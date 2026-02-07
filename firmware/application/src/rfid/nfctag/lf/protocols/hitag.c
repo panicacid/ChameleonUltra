@@ -98,7 +98,7 @@ bool hitag2_decode_biplm_bit(hitag_codec *d, uint8_t half_bit) {
         // Check for mid-bit transition
         // If state changed, it's a '1' (extra transition)
         // If state same, it's a '0' (no extra transition)
-        bool bit = (d->biphase_state != half_bit);
+        // Note: This is a stub - actual bit value not currently used
         d->biphase_state = 0;
         return true;  // Complete bit decoded
     }
