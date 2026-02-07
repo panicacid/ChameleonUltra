@@ -40,6 +40,11 @@ extern "C" {
 #define HITAG2_BPLM_BIT0_HIGH_US (HITAG2_BPLM_0_TIME - HITAG2_BPLM_PULSE_US)  // 112μs (14 Tc)
 #define HITAG2_BPLM_BIT1_HIGH_US (HITAG2_BPLM_1_TIME - HITAG2_BPLM_PULSE_US)  // 192μs (24 Tc)
 
+// PWM hardware settling time
+// NRF52 PWM needs time to ramp up/down cleanly (~1-2 PWM cycles at 125kHz = 8-16μs)
+// We use 15μs as empirically determined value for clean transitions
+#define HITAG2_PWM_SETTLE_US     15   // Time for PWM to stabilize after start/stop
+
 /**
  * Read Hitag2 tag UID using RTF protocol with BPLM encoding
  * 

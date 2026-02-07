@@ -79,16 +79,19 @@ static void uninit_hitag2_hw(void) {
 static void hitag2_send_bit(uint8_t bit) {
     // Start with PULSE (field OFF) - this is the BPLM signature
     stop_lf_125khz_radio();
-    bsp_delay_us(HITAG2_BPLM_PULSE_US);  // 48μs OFF (6 Tc)
+    bsp_delay_us(HITAG2_PWM_SETTLE_US);  // Let PWM ramp down cleanly
+    bsp_delay_us(HITAG2_BPLM_PULSE_US - HITAG2_PWM_SETTLE_US);  // Rest of pulse time
     
     // Then field ON for duration that encodes the bit value
     start_lf_125khz_radio();
+    bsp_delay_us(HITAG2_PWM_SETTLE_US);  // Let PWM stabilize ON
+    
     if (bit & 0x01) {
         // Bit 1: Longer ON time
-        bsp_delay_us(HITAG2_BPLM_BIT1_HIGH_US);  // 192μs ON (24 Tc)
+        bsp_delay_us(HITAG2_BPLM_BIT1_HIGH_US - HITAG2_PWM_SETTLE_US);  // Rest of ON time
     } else {
         // Bit 0: Shorter ON time
-        bsp_delay_us(HITAG2_BPLM_BIT0_HIGH_US);  // 112μs ON (14 Tc)
+        bsp_delay_us(HITAG2_BPLM_BIT0_HIGH_US - HITAG2_PWM_SETTLE_US);  // Rest of ON time
     }
 }
 
