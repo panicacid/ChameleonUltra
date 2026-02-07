@@ -31,6 +31,16 @@ NRF_LOG_MODULE_REGISTER();
 // For emulation, we'll use the most common rate (RF/50 for Hitag2)
 #define HITAG_T55XX_BLOCK_COUNT 3
 
+// PWM sequence timing constants for RF/50 encoding
+#define HITAG_PWM_DUTY_CYCLE 25      // 50% duty cycle (25 out of 50)
+#define HITAG_PWM_COUNTER_TOP 50     // RF/50 timing
+#define HITAG_PWM_POLARITY_BIT (1 << 15)  // MSB for polarity
+
+// Period detection thresholds for Manchester demodulation at RF/50
+#define HITAG_T_LOW 0x40
+#define HITAG_T_HIGH 0x60
+#define HITAG_T_JITTER 0x10
+
 // PWM sequence storage for Hitag2
 static nrf_pwm_values_wave_form_t m_hitag2_pwm_seq_vals[HITAG_RAW_SIZE] = {};
 
@@ -99,14 +109,11 @@ uint8_t hitag2_period(uint8_t interval) {
     // Simplified period detection for Hitag2
     // T0 = 8us, RF/50 means 50 RF cycles per bit
     // This needs to be tuned based on actual hardware timing
-    const uint8_t T_LOW = 0x40;
-    const uint8_t T_HIGH = 0x60;
-    const uint8_t T_JITTER = 0x10;
     
-    if (interval >= (T_LOW - T_JITTER) && interval <= (T_LOW + T_JITTER)) {
+    if (interval >= (HITAG_T_LOW - HITAG_T_JITTER) && interval <= (HITAG_T_LOW + HITAG_T_JITTER)) {
         return 0;
     }
-    if (interval >= (T_HIGH - T_JITTER) && interval <= (T_HIGH + T_JITTER)) {
+    if (interval >= (HITAG_T_HIGH - HITAG_T_JITTER) && interval <= (HITAG_T_HIGH + HITAG_T_JITTER)) {
         return 1;
     }
     return 3;  // Invalid period
@@ -114,12 +121,22 @@ uint8_t hitag2_period(uint8_t interval) {
 
 hitag_codec *hitag2_alloc(void) {
     hitag_codec *codec = malloc(sizeof(hitag_codec));
+    if (codec == NULL) {
+        return NULL;
+    }
     codec->modem = malloc(sizeof(manchester));
+    if (codec->modem == NULL) {
+        free(codec);
+        return NULL;
+    }
     codec->modem->rp = hitag2_period;
     return codec;
 }
 
 void hitag_free(hitag_codec *d) {
+    if (d == NULL) {
+        return;
+    }
     if (d->modem) {
         free(d->modem);
         d->modem = NULL;
@@ -127,11 +144,17 @@ void hitag_free(hitag_codec *d) {
     free(d);
 }
 
-uint8_t *hitag_get_data(hitag_codec *d) { 
-    return d->data; 
+uint8_t *hitag_get_data(hitag_codec *d) {
+    if (d == NULL) {
+        return NULL;
+    }
+    return d->data;
 }
 
 void hitag2_decoder_start(hitag_codec *d, uint8_t format) {
+    if (d == NULL) {
+        return;
+    }
     memset(d->data, 0, HITAG_DATA_SIZE);
     d->raw = 0;
     d->raw_length = 0;
@@ -194,6 +217,10 @@ bool hitag2_decoder_feed(hitag_codec *d, uint16_t interval) {
 }
 
 const nrf_pwm_sequence_t *hitag2_modulator(hitag_codec *d, uint8_t *buf) {
+    if (d == NULL || buf == NULL) {
+        return NULL;
+    }
+    
     // Generate PWM sequence for Hitag2 tag response (upstream)
     // Tag uses Manchester encoding for upstream communication
     uint64_t data = hitag2_raw_data(buf);
@@ -209,16 +236,16 @@ const nrf_pwm_sequence_t *hitag2_modulator(hitag_codec *d, uint8_t *buf) {
         
         if (bit) {
             // Logic 1: low-high (start low, transition to high)
-            m_hitag2_pwm_seq_vals[i * 2].channel_0 = 0 | 25;
-            m_hitag2_pwm_seq_vals[i * 2].counter_top = 50;
-            m_hitag2_pwm_seq_vals[i * 2 + 1].channel_0 = (1 << 15) | 25;
-            m_hitag2_pwm_seq_vals[i * 2 + 1].counter_top = 50;
+            m_hitag2_pwm_seq_vals[i * 2].channel_0 = 0 | HITAG_PWM_DUTY_CYCLE;
+            m_hitag2_pwm_seq_vals[i * 2].counter_top = HITAG_PWM_COUNTER_TOP;
+            m_hitag2_pwm_seq_vals[i * 2 + 1].channel_0 = HITAG_PWM_POLARITY_BIT | HITAG_PWM_DUTY_CYCLE;
+            m_hitag2_pwm_seq_vals[i * 2 + 1].counter_top = HITAG_PWM_COUNTER_TOP;
         } else {
             // Logic 0: high-low (start high, transition to low)
-            m_hitag2_pwm_seq_vals[i * 2].channel_0 = (1 << 15) | 25;
-            m_hitag2_pwm_seq_vals[i * 2].counter_top = 50;
-            m_hitag2_pwm_seq_vals[i * 2 + 1].channel_0 = 0 | 25;
-            m_hitag2_pwm_seq_vals[i * 2 + 1].counter_top = 50;
+            m_hitag2_pwm_seq_vals[i * 2].channel_0 = HITAG_PWM_POLARITY_BIT | HITAG_PWM_DUTY_CYCLE;
+            m_hitag2_pwm_seq_vals[i * 2].counter_top = HITAG_PWM_COUNTER_TOP;
+            m_hitag2_pwm_seq_vals[i * 2 + 1].channel_0 = 0 | HITAG_PWM_DUTY_CYCLE;
+            m_hitag2_pwm_seq_vals[i * 2 + 1].counter_top = HITAG_PWM_COUNTER_TOP;
         }
     }
     
