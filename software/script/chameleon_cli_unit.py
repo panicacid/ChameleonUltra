@@ -4164,7 +4164,7 @@ class LFHitag2WriteT55xx(LFHitag2IdArgsUnit, ReaderRequiredUnit):
         print(f" - Hitag2 UID(8H): {uid_hex.upper()} write done.")
 
 
-@hw_slot_emulator.command('hitag2')
+@lf_hitag2.command('econfig')
 class LFHitag2Econfig(SlotIndexArgsAndGoUnit, LFHitag2IdArgsUnit):
     def args_parser(self) -> ArgumentParserNoExit:
         parser = ArgumentParserNoExit()
