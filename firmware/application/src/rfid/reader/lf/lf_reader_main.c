@@ -52,12 +52,12 @@ uint8_t scan_viking(uint8_t *uid) {
 
 /**
  * Scan for Hitag2 tag and return UID
- * Note: This is a stub implementation - Hitag2 is a Reader-Talk-First protocol
- * that requires active interrogation, not passive scanning like EM410x
+ * Note: Hitag2 is a Reader-Talk-First protocol that requires active interrogation
  */
 uint8_t scan_hitag2(uint8_t *uid) {
-    // TODO: Implement proper Hitag2 RTF protocol communication
-    // For now, return not found as Hitag2 requires active reader implementation
+    if (hitag2_read(uid, g_timeout_readem_ms)) {
+        return STATUS_LF_TAG_OK;
+    }
     return STATUS_LF_TAG_NO_FOUND;
 }
 
