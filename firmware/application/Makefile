@@ -38,6 +38,7 @@ SRC_FILES += \
   $(PROJ_DIR)/rfid/nfctag/lf/protocols/hidprox.c \
   $(PROJ_DIR)/rfid/nfctag/lf/protocols/viking.c \
   $(PROJ_DIR)/rfid/nfctag/lf/protocols/wiegand.c \
+  $(PROJ_DIR)/rfid/nfctag/lf/protocols/hitag.c \
   $(PROJ_DIR)/utils/dataframe.c \
   $(PROJ_DIR)/utils/delayed_reset.c \
   $(PROJ_DIR)/utils/fds_util.c \

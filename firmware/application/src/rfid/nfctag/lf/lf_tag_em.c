@@ -10,6 +10,7 @@
 #include "protocols/em410x.h"
 #include "protocols/hidprox.h"
 #include "protocols/viking.h"
+#include "protocols/hitag.h"
 #include "syssleep.h"
 #include "tag_emulation.h"
 #include "tag_persistence.h"
@@ -214,6 +215,16 @@ int lf_tag_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffer) {
         return LF_VIKING_TAG_ID_SIZE;
     }
 
+    if ((type == TAG_TYPE_HITAG2 || type == TAG_TYPE_HITAG2_PAXTON) && buffer->length >= LF_HITAG2_TAG_ID_SIZE) {
+        m_tag_type = type;
+        const protocol *p = type == TAG_TYPE_HITAG2_PAXTON ? &hitag2_paxton : &hitag2;
+        void *codec = p->alloc();
+        m_pwm_seq = p->modulator(codec, buffer->buffer);
+        p->free(codec);
+        NRF_LOG_INFO("load lf hitag2%s data finish.", type == TAG_TYPE_HITAG2_PAXTON ? " paxton" : "");
+        return LF_HITAG2_TAG_ID_SIZE;
+    }
+
     NRF_LOG_ERROR("no valid data exists in buffer for tag type: %d.", type);
     return 0;
 }
@@ -311,5 +322,30 @@ bool lf_tag_hidprox_data_factory(uint8_t slot, tag_specific_type_t tag_type) {
 bool lf_tag_viking_data_factory(uint8_t slot, tag_specific_type_t tag_type) {
     // default id
     uint8_t tag_id[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+    return lf_tag_data_factory(slot, tag_type, tag_id, sizeof(tag_id));
+}
+
+/** @brief Hitag2 card save callback
+ * @param type      Refined tag type
+ * @param buffer    Data buffer
+ * @return The length of the data that needs to be saved is that it does not save when 0
+ */
+int lf_tag_hitag2_data_savecb(tag_specific_type_t type, tag_data_buffer_t *buffer) {
+    // Make sure to load this tag before allowing saving
+    // Just save the original card package directly
+    if (m_tag_type == TAG_TYPE_HITAG2 || m_tag_type == TAG_TYPE_HITAG2_PAXTON) {
+        return LF_HITAG2_TAG_ID_SIZE;
+    }
+    return 0;
+}
+
+/** @brief Hitag2 card factory data initialization
+ * @param slot      Card slot number
+ * @param tag_type  Refined tag type
+ * @return Whether the format is successful, if the formatting is successful, it will return to True, otherwise False will be returned
+ */
+bool lf_tag_hitag2_data_factory(uint8_t slot, tag_specific_type_t tag_type) {
+    // default Hitag2 UID (4 bytes)
+    uint8_t tag_id[4] = {0x01, 0x02, 0x03, 0x04};
     return lf_tag_data_factory(slot, tag_type, tag_id, sizeof(tag_id));
 }
