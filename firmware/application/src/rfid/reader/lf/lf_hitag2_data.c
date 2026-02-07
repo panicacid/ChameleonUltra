@@ -13,21 +13,12 @@
 #include "nrf_log_default_backends.h"
 NRF_LOG_MODULE_REGISTER();
 
-// Hitag2 timing constants (in microseconds)
-// Based on Proxmark3 hitag2.c and converted to ChameleonUltra timing
+// Hitag2 protocol timing constants (in microseconds)
+// Based on Proxmark3 hitag2.c and Hitag2 specification
 // At 125kHz: 1 carrier period (Tc) = 8μs
-#define HITAG_T_WAIT_POWERUP_US    2504  // 313 Tc = 2.504ms
-#define HITAG_T_WAIT_START_AUTH_US  464  // 58 Tc = 464μs  
-#define HITAG_T_WAIT_RESPONSE_US   1600  // 200 Tc = 1.6ms
-
-// BPLM encoding using gap modulation (like T55xx)
-// Instead of toggling field ON/OFF rapidly (too fast for PWM),
-// we keep field ON and create gaps for transitions
-#define HITAG_T_0_HIGH_US          140  // 18 Tc = 144μs field ON for bit 0
-#define HITAG_T_0_GAP_US            20  // 2-3 Tc = 16-24μs gap for bit 0  
-#define HITAG_T_1_HIGH_US          100  // 12-13 Tc = ~100μs field ON for first half of bit 1
-#define HITAG_T_1_GAP_US            20  // 2-3 Tc = 16-24μs gap for bit 1 transitions
-#define HITAG_T_1_HIGH2_US         100  // 12-13 Tc = ~100μs field ON for second half of bit 1
+#define HITAG_T_WAIT_POWERUP_US    2504  // 313 Tc = 2.504ms - Tag powerup time
+#define HITAG_T_WAIT_START_AUTH_US  464  // 58 Tc = 464μs - START_AUTH window
+#define HITAG_T_WAIT_RESPONSE_US   1600  // 200 Tc = 1.6ms - Wait for tag response
 
 // START_AUTH command: 5 bits = 11000 binary (MSB first)
 #define HITAG2_START_AUTH_BITS    5
@@ -62,7 +53,10 @@ static void uninit_hitag2_hw(void) {
 
 /**
  * Send a gap (field OFF briefly) like T55xx
- * This creates a detectable transition in the field
+ * This creates a detectable transition in the field.
+ * The gap is part of the total bit duration, not additional time.
+ * 
+ * @param gap_us Duration to keep field OFF (in microseconds)
  */
 static void hitag2_send_gap(uint32_t gap_us) {
     stop_lf_125khz_radio();
@@ -76,8 +70,18 @@ static void hitag2_send_gap(uint32_t gap_us) {
  * BPLM encoding adapted for ChameleonUltra hardware:
  * - Field stays ON most of the time (powers tag)
  * - Transitions created by brief gaps (field OFF)
- * - Bit 0: Field ON, one gap, field ON (total ~160μs)
- * - Bit 1: Field ON, gap, field ON, gap, field ON (total ~240μs)
+ * 
+ * Bit 0 timing (160μs total per spec):
+ *   - Field ON: HITAG2_BPLM_BIT0_HIGH_US (140μs)
+ *   - Gap OFF:  HITAG2_BPLM_LOW_TIME (20μs)
+ *   - TOTAL: 140 + 20 = 160μs ✓
+ * 
+ * Bit 1 timing (240μs total per spec):
+ *   - Field ON: HITAG2_BPLM_BIT1_HIGH_US (100μs)
+ *   - Gap OFF:  HITAG2_BPLM_LOW_TIME (20μs)
+ *   - Field ON: HITAG2_BPLM_BIT1_HIGH_US (100μs)
+ *   - Gap OFF:  HITAG2_BPLM_LOW_TIME (20μs)
+ *   - TOTAL: 100 + 20 + 100 + 20 = 240μs ✓
  * 
  * This approach works like T55xx writing (proven working).
  * Much more reliable than rapid PWM start/stop toggling.
@@ -87,20 +91,22 @@ static void hitag2_send_gap(uint32_t gap_us) {
 static void hitag2_send_bit(uint8_t bit) {
     if (bit & 0x01) {
         // Bit 1: Two transitions (two gaps)
-        // Field ON for first half
-        bsp_delay_us(HITAG_T_1_HIGH_US);
+        // First half: Field ON
+        bsp_delay_us(HITAG2_BPLM_BIT1_HIGH_US);  // 100μs
         // First gap (transition 1)
-        hitag2_send_gap(HITAG_T_1_GAP_US);
-        // Field ON for second half
-        bsp_delay_us(HITAG_T_1_HIGH2_US);
+        hitag2_send_gap(HITAG2_BPLM_LOW_TIME);   // 20μs
+        // Second half: Field ON
+        bsp_delay_us(HITAG2_BPLM_BIT1_HIGH_US);  // 100μs
         // Second gap (transition 2)
-        hitag2_send_gap(HITAG_T_1_GAP_US);
+        hitag2_send_gap(HITAG2_BPLM_LOW_TIME);   // 20μs
+        // TOTAL: 100 + 20 + 100 + 20 = 240μs
     } else {
         // Bit 0: One transition (one gap)
-        // Field ON for bit duration
-        bsp_delay_us(HITAG_T_0_HIGH_US);
+        // Field ON for most of bit duration
+        bsp_delay_us(HITAG2_BPLM_BIT0_HIGH_US);  // 140μs
         // Single gap (transition)
-        hitag2_send_gap(HITAG_T_0_GAP_US);
+        hitag2_send_gap(HITAG2_BPLM_LOW_TIME);   // 20μs
+        // TOTAL: 140 + 20 = 160μs
     }
 }
 
