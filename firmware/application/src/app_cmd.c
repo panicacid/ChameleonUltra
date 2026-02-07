@@ -737,6 +737,30 @@ static data_frame_tx_t *cmd_processor_viking_write_to_t55xx(uint16_t cmd, uint16
     status = write_viking_to_t55xx(payload->id, payload->new_key, payload->old_keys, (length - offsetof(payload_t, old_keys)) / sizeof(payload->old_keys));
     return data_frame_make(cmd, status, 0, NULL);
 }
+
+static data_frame_tx_t *cmd_processor_hitag2_scan(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    uint8_t uid_buffer[4] = {0x00};
+    status = scan_hitag2(uid_buffer);
+    if (status != STATUS_LF_TAG_OK) {
+        return data_frame_make(cmd, status, 0, NULL);
+    }
+    return data_frame_make(cmd, STATUS_LF_TAG_OK, sizeof(uid_buffer), uid_buffer);
+}
+
+static data_frame_tx_t *cmd_processor_hitag2_write_to_t55xx(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    typedef struct {
+        uint8_t uid[4];
+        uint8_t new_key[4];
+        uint8_t old_keys[4]; // we can have more than one... struct just to compute offsets with min 1 key
+    } PACKED payload_t;
+    payload_t *payload = (payload_t *)data;
+    if (length < sizeof(payload_t) || (length - offsetof(payload_t, old_keys)) % sizeof(payload->old_keys) != 0) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+
+    status = write_hitag2_to_t55xx(payload->uid, payload->new_key, payload->old_keys, (length - offsetof(payload_t, old_keys)) / sizeof(payload->old_keys));
+    return data_frame_make(cmd, status, 0, NULL);
+}
 #endif
 
 
@@ -939,6 +963,26 @@ static data_frame_tx_t *cmd_processor_viking_get_emu_id(uint16_t cmd, uint16_t s
     }
     tag_data_buffer_t *buffer = get_buffer_by_tag_type(TAG_TYPE_VIKING);
     return data_frame_make(cmd, STATUS_SUCCESS, LF_VIKING_TAG_ID_SIZE, buffer->buffer);
+}
+
+static data_frame_tx_t *cmd_processor_hitag2_set_emu_id(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    if (length != LF_HITAG2_TAG_ID_SIZE) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+    tag_data_buffer_t *buffer = get_buffer_by_tag_type(TAG_TYPE_HITAG2);
+    memcpy(buffer->buffer, data, LF_HITAG2_TAG_ID_SIZE);
+    tag_emulation_load_by_buffer(TAG_TYPE_HITAG2, false);
+    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+}
+
+static data_frame_tx_t *cmd_processor_hitag2_get_emu_id(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    tag_slot_specific_type_t tag_types;
+    tag_emulation_get_specific_types_by_slot(tag_emulation_get_slot(), &tag_types);
+    if (tag_types.tag_lf != TAG_TYPE_HITAG2 && tag_types.tag_lf != TAG_TYPE_HITAG2_PAXTON) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, data);  // no data in slot, don't send garbage
+    }
+    tag_data_buffer_t *buffer = get_buffer_by_tag_type(tag_types.tag_lf);
+    return data_frame_make(cmd, STATUS_SUCCESS, LF_HITAG2_TAG_ID_SIZE, buffer->buffer);
 }
 
 static nfc_tag_14a_coll_res_reference_t *get_coll_res_data(bool write) {
@@ -1671,6 +1715,8 @@ static cmd_data_map_t m_data_cmd_map[] = {
     {    DATA_CMD_HIDPROX_WRITE_TO_T55XX,       before_reader_run,           cmd_processor_hidprox_write_to_t55xx,        NULL                   },
     {    DATA_CMD_VIKING_SCAN,                  before_reader_run,           cmd_processor_viking_scan,                   NULL                   },
     {    DATA_CMD_VIKING_WRITE_TO_T55XX,        before_reader_run,           cmd_processor_viking_write_to_t55xx,         NULL                   },
+    {    DATA_CMD_HITAG2_SCAN,                  before_reader_run,           cmd_processor_hitag2_scan,                   NULL                   },
+    {    DATA_CMD_HITAG2_WRITE_TO_T55XX,        before_reader_run,           cmd_processor_hitag2_write_to_t55xx,         NULL                   },
 
     {    DATA_CMD_HF14A_SET_FIELD_ON,           before_reader_run,           cmd_processor_hf14a_set_field_on,            NULL                   },
     {    DATA_CMD_HF14A_SET_FIELD_OFF,          before_reader_run,           cmd_processor_hf14a_set_field_off,           NULL                   },
@@ -1727,6 +1773,8 @@ static cmd_data_map_t m_data_cmd_map[] = {
     {    DATA_CMD_HIDPROX_GET_EMU_ID,             NULL,                      cmd_processor_hidprox_get_emu_id,            NULL                   },
     {    DATA_CMD_VIKING_SET_EMU_ID,              NULL,                      cmd_processor_viking_set_emu_id,             NULL                   },
     {    DATA_CMD_VIKING_GET_EMU_ID,              NULL,                      cmd_processor_viking_get_emu_id,             NULL                   },
+    {    DATA_CMD_HITAG2_SET_EMU_ID,              NULL,                      cmd_processor_hitag2_set_emu_id,             NULL                   },
+    {    DATA_CMD_HITAG2_GET_EMU_ID,              NULL,                      cmd_processor_hitag2_get_emu_id,             NULL                   },
 };
 
 data_frame_tx_t *cmd_processor_get_device_capabilities(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {

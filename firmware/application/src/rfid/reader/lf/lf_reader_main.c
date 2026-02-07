@@ -7,6 +7,7 @@
 #include "lf_reader_data.h"
 #include "protocols/em410x.h"
 #include "protocols/hidprox.h"
+#include "protocols/hitag.h"
 #include "protocols/t55xx.h"
 #include "protocols/viking.h"
 
@@ -46,6 +47,17 @@ uint8_t scan_viking(uint8_t *uid) {
     if (viking_read(uid, g_timeout_readem_ms)) {
         return STATUS_LF_TAG_OK;
     }
+    return STATUS_LF_TAG_NO_FOUND;
+}
+
+/**
+ * Scan for Hitag2 tag and return UID
+ * Note: This is a stub implementation - Hitag2 is a Reader-Talk-First protocol
+ * that requires active interrogation, not passive scanning like EM410x
+ */
+uint8_t scan_hitag2(uint8_t *uid) {
+    // TODO: Implement proper Hitag2 RTF protocol communication
+    // For now, return not found as Hitag2 requires active reader implementation
     return STATUS_LF_TAG_NO_FOUND;
 }
 
@@ -124,6 +136,18 @@ uint8_t write_hidprox_to_t55xx(uint8_t format, uint32_t fc, uint64_t cn, uint32_
 uint8_t write_viking_to_t55xx(uint8_t *uid, uint8_t *new_passwd, uint8_t *old_passwds, uint8_t old_passwd_count) {
     uint32_t blks[7] = {0x00};
     uint8_t blk_count = viking_t55xx_writer(uid, blks);
+    if (blk_count == 0) {
+        return STATUS_PAR_ERR;
+    }
+    return write_t55xx(blks, blk_count, new_passwd, old_passwds, old_passwd_count);
+}
+
+/**
+ * Write Hitag2 UID to t55xx
+ */
+uint8_t write_hitag2_to_t55xx(uint8_t *uid, uint8_t *new_passwd, uint8_t *old_passwds, uint8_t old_passwd_count) {
+    uint32_t blks[7] = {0x00};
+    uint8_t blk_count = hitag2_t55xx_writer(uid, blks);
     if (blk_count == 0) {
         return STATUS_PAR_ERR;
     }
