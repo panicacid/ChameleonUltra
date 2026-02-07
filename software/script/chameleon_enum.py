@@ -83,6 +83,8 @@ class Command(enum.IntEnum):
     HIDPROX_WRITE_TO_T55XX = 3003
     VIKING_SCAN = 3004
     VIKING_WRITE_TO_T55XX = 3005
+    HITAG2_SCAN = 3007
+    HITAG2_WRITE_TO_T55XX = 3008
 
     MF1_WRITE_EMU_BLOCK_DATA = 4000
     HF14A_SET_ANTI_COLL_DATA = 4001
@@ -136,6 +138,8 @@ class Command(enum.IntEnum):
     HIDPROX_GET_EMU_ID = 5003
     VIKING_SET_EMU_ID = 5004
     VIKING_GET_EMU_ID = 5005
+    HITAG2_SET_EMU_ID = 5006
+    HITAG2_GET_EMU_ID = 5007
 
 
 @enum.unique
@@ -291,6 +295,8 @@ class TagSpecificType(enum.IntEnum):
     # EM4x05/4x69
     # EM4x50/4x70
     # Hitag series
+    Hitag2 = 400
+    Hitag2_Paxton = 402
 
     TAG_TYPES_LF_END = 999
 
@@ -362,6 +368,10 @@ class TagSpecificType(enum.IntEnum):
             return "HIDProx"
         elif self == TagSpecificType.Viking:
             return "Viking"
+        elif self == TagSpecificType.Hitag2:
+            return "Hitag2"
+        elif self == TagSpecificType.Hitag2_Paxton:
+            return "Hitag2 (Paxton)"
         elif self == TagSpecificType.MIFARE_Mini:
             return "Mifare Mini"
         elif self == TagSpecificType.MIFARE_1024:

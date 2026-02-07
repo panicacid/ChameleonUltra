@@ -521,6 +521,26 @@ class LFVikingIdArgsUnit(DeviceRequiredUnit):
     def on_exec(self, args: argparse.Namespace):
         raise NotImplementedError("Please implement this")
 
+
+class LFHitag2IdArgsUnit(DeviceRequiredUnit):
+    @staticmethod
+    def add_card_arg(parser: ArgumentParserNoExit, required=False):
+        parser.add_argument("--id", type=str, required=required, help="Hitag2 UID (4 bytes)", metavar="<hex>")
+        return parser
+
+    def before_exec(self, args: argparse.Namespace):
+        if not super().before_exec(args):
+            return False
+        if args.id is None or not re.match(r"^[a-fA-F0-9]{8}$", args.id):
+            raise ArgsParserError("UID must include 8 HEX symbols (4 bytes)")
+        return True
+
+    def args_parser(self) -> ArgumentParserNoExit:
+        raise NotImplementedError("Please implement this")
+
+    def on_exec(self, args: argparse.Namespace):
+        raise NotImplementedError("Please implement this")
+
 class TagTypeArgsUnit(DeviceRequiredUnit):
     @staticmethod
     def add_type_args(parser: ArgumentParserNoExit):
@@ -553,6 +573,8 @@ lf_em_410x = lf_em.subgroup('410x', 'EM410x commands')
 lf_hid = lf.subgroup('hid', 'HID commands')
 lf_hid_prox = lf_hid.subgroup('prox', 'HID Prox commands')
 lf_viking = lf.subgroup('viking', 'Viking commands')
+lf_hitag = lf.subgroup('hitag', 'Hitag commands')
+lf_hitag2 = lf_hitag.subgroup('hitag2', 'Hitag2 commands')
 
 @root.command('clear')
 class RootClear(BaseCLIUnit):
@@ -4114,6 +4136,56 @@ class LFVikingEconfig(SlotIndexArgsAndGoUnit, LFVikingIdArgsUnit):
             response = self.cmd.viking_get_emu_id()
             print(' - Get Viking tag id success.')
             print(f'ID: {response.hex().upper()}')
+
+
+@lf_hitag2.command('read')
+class LFHitag2Read(ReaderRequiredUnit):
+    def args_parser(self) -> ArgumentParserNoExit:
+        parser = ArgumentParserNoExit()
+        parser.description = 'Scan Hitag2 tag and print UID'
+        return parser
+
+    def on_exec(self, args: argparse.Namespace):
+        uid = self.cmd.hitag2_scan()
+        print(f" Hitag2 UID: {color_string((CG, uid.hex().upper()))}")
+
+
+@lf_hitag2.command('write')
+class LFHitag2WriteT55xx(LFHitag2IdArgsUnit, ReaderRequiredUnit):
+    def args_parser(self) -> ArgumentParserNoExit:
+        parser = ArgumentParserNoExit()
+        parser.description = 'Write Hitag2 UID to T55xx'
+        return self.add_card_arg(parser, required=True)
+
+    def on_exec(self, args: argparse.Namespace):
+        uid_hex = args.id
+        uid_bytes = bytes.fromhex(uid_hex)
+        self.cmd.hitag2_write_to_t55xx(uid_bytes)
+        print(f" - Hitag2 UID(8H): {uid_hex.upper()} write done.")
+
+
+@hw_slot_emulator.command('hitag2')
+class LFHitag2Econfig(SlotIndexArgsAndGoUnit, LFHitag2IdArgsUnit):
+    def args_parser(self) -> ArgumentParserNoExit:
+        parser = ArgumentParserNoExit()
+        parser.description = 'Set emulated Hitag2 card UID'
+        self.add_slot_args(parser)
+        self.add_card_arg(parser)
+        return parser
+
+    def on_exec(self, args: argparse.Namespace):
+        if args.id is not None:
+            slotinfo = self.cmd.get_slot_info()
+            selected = SlotNumber.from_fw(self.cmd.get_active_slot())
+            lf_tag_type = TagSpecificType(slotinfo[selected - 1]['lf'])
+            if lf_tag_type not in (TagSpecificType.Hitag2, TagSpecificType.Hitag2_Paxton):
+                print(f"{color_string((CR, 'WARNING'))}: Slot type not set to Hitag2 or Hitag2_Paxton.")
+            self.cmd.hitag2_set_emu_id(bytes.fromhex(args.id))
+            print(' - Set Hitag2 tag UID success.')
+        else:
+            response = self.cmd.hitag2_get_emu_id()
+            print(' - Get Hitag2 tag UID success.')
+            print(f'UID: {response.hex().upper()}')
 
 @hw_slot.command('nick')
 class HWSlotNick(SlotIndexArgsUnit, SenseTypeArgsUnit):
