@@ -120,8 +120,13 @@ static void hitag2_send_start_auth(void) {
 /**
  * Timeslot callback for time-critical BPLM transmission
  * This is called within a radio timeslot with interrupts disabled
+ * 
+ * Following T55xx pattern: Start field INSIDE timeslot for proper control
  */
 static void hitag2_timeslot_callback(void) {
+    // Start field first to power tag (following T55xx pattern)
+    start_lf_125khz_radio();
+    
     // Wait for tag to power up (2.5ms)
     bsp_delay_us(HITAG_T_WAIT_POWERUP_US);
     
@@ -129,7 +134,7 @@ static void hitag2_timeslot_callback(void) {
     bsp_delay_us(HITAG_T_WAIT_START_AUTH_US);
     
     // Send START_AUTH command with correct BPLM encoding
-    // Field was started before timeslot, so it's ON now
+    // Field is ON, first bit will drop it (pulse), then bring it back
     hitag2_send_start_auth();
     
     // Field is now ON after transmission
@@ -167,16 +172,13 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     // Initialize GPIO interrupts for receiving tag response
     init_hitag2_hw();
     
-    // Start LF field - this powers the tag and lights LED
-    // Field must be ON before entering timeslot
-    start_lf_125khz_radio();
-    
     NRF_LOG_INFO("Requesting timeslot for precise BPLM transmission...");
     
     // Request timeslot for time-critical transmission
+    // Following T55xx pattern: Field is started INSIDE timeslot
     // This ensures precise timing without BLE interference
-    // Duration: 5ms (powerup + auth window + transmission + margin)
-    request_timeslot(5000, hitag2_timeslot_callback);
+    // Duration: 10ms (powerup + auth window + transmission + response + margin)
+    request_timeslot(10000, hitag2_timeslot_callback);
     
     NRF_LOG_INFO("START_AUTH transmitted with correct BPLM");
     
