@@ -531,7 +531,8 @@ class ChameleonCMD:
         """
         if len(id_bytes) != 4:
             raise ValueError("The id bytes length must equal 4")
-        return self.device.send_cmd_sync(Command.VIKING_WRITE_TO_T55XX, id_bytes)
+        data = struct.pack(f'!4s4s{4*len(old_keys)}s', id_bytes, new_key, b''.join(old_keys))
+        return self.device.send_cmd_sync(Command.VIKING_WRITE_TO_T55XX, data)
 
     @expect_response(Status.LF_TAG_OK)
     def hitag2_scan(self):

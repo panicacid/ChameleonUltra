@@ -121,22 +121,12 @@ uint8_t hitag2_period(uint8_t interval) {
 
 hitag_codec *hitag2_alloc(void) {
     hitag_codec *codec = malloc(sizeof(hitag_codec));
-    if (codec == NULL) {
-        return NULL;
-    }
     codec->modem = malloc(sizeof(manchester));
-    if (codec->modem == NULL) {
-        free(codec);
-        return NULL;
-    }
     codec->modem->rp = hitag2_period;
     return codec;
 }
 
 void hitag_free(hitag_codec *d) {
-    if (d == NULL) {
-        return;
-    }
     if (d->modem) {
         free(d->modem);
         d->modem = NULL;
@@ -145,16 +135,10 @@ void hitag_free(hitag_codec *d) {
 }
 
 uint8_t *hitag_get_data(hitag_codec *d) {
-    if (d == NULL) {
-        return NULL;
-    }
     return d->data;
 }
 
 void hitag2_decoder_start(hitag_codec *d, uint8_t format) {
-    if (d == NULL) {
-        return;
-    }
     memset(d->data, 0, HITAG_DATA_SIZE);
     d->raw = 0;
     d->raw_length = 0;
@@ -217,10 +201,6 @@ bool hitag2_decoder_feed(hitag_codec *d, uint16_t interval) {
 }
 
 const nrf_pwm_sequence_t *hitag2_modulator(hitag_codec *d, uint8_t *buf) {
-    if (d == NULL || buf == NULL) {
-        return NULL;
-    }
-    
     // Generate PWM sequence for Hitag2 tag response (upstream)
     // Tag uses Manchester encoding for upstream communication
     uint64_t data = hitag2_raw_data(buf);
