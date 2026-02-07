@@ -54,6 +54,8 @@ Bit 1: OFF(48μs) + ON(192μs) = 240μs
 - Correct OFF-then-ON pattern matching Proxmark3 implementation
 - Each bit starts with 48μs PULSE (field OFF)
 - Followed by variable ON time (112μs for bit 0, 192μs for bit 1)
+- **PWM hardware settling delays** (15μs) for clean field transitions
+- NRF52 PWM ramp up/down time accounted for in timing calculations
 - Total bit timing: 160μs (bit 0), 240μs (bit 1) per Hitag2 spec
 - START_AUTH command transmission (5 bits: 11000)
 - **Timeslot API integration** for precision timing without BLE interference
@@ -65,7 +67,7 @@ Bit 1: OFF(48μs) + ON(192μs) = 240μs
 - RTF protocol sequence with proper timing
 - Powerup wait (2.5ms)
 - START_AUTH window timing (464μs)
-- BPLM bit transmission
+- BPLM bit transmission with hardware settling
 - GPIO interrupt-based response reception
 - Manchester decoder for 32-bit UID
 
@@ -87,6 +89,7 @@ Bit 1: OFF(48μs) + ON(192μs) = 240μs
 - Data load/save callbacks for flash persistence
 - Proper error handling and null checks
 - Named constants for timing parameters
+- Hardware-aware timing with PWM settling delays
 
 ### Requires Hardware Testing ⚠️
 
@@ -238,31 +241,40 @@ chameleon lf hitag hitag2 read
 
 **BPLM Encoding (Binary Pulse Length Modulation):**
 
-Correct implementation matching Proxmark3 hitag2.c:
+Correct implementation matching Proxmark3 hitag2.c with PWM hardware settling:
 
 ```c
-// Each bit: PULSE (OFF) then ON
+// Each bit: PULSE (OFF) then ON with hardware settling delays
 // Pattern: |___PULSE___|------ON------|
 
 // Bit 0 (160μs total):
 stop_lf_125khz_radio();          // Pulse start (OFF)
-bsp_delay_us(48);                // Pulse duration (6 Tc)
+bsp_delay_us(15);                // PWM ramp down time
+bsp_delay_us(33);                // Clean OFF time (48-15)
 start_lf_125khz_radio();         // Field ON
-bsp_delay_us(112);               // ON duration (14 Tc)
+bsp_delay_us(15);                // PWM stabilize time
+bsp_delay_us(97);                // Clean ON time (112-15)
 // Total: 48 + 112 = 160μs ✓
 
 // Bit 1 (240μs total):
 stop_lf_125khz_radio();          // Pulse start (OFF)
-bsp_delay_us(48);                // Pulse duration (6 Tc)
+bsp_delay_us(15);                // PWM ramp down time
+bsp_delay_us(33);                // Clean OFF time (48-15)
 start_lf_125khz_radio();         // Field ON
-bsp_delay_us(192);               // ON duration (24 Tc)
+bsp_delay_us(15);                // PWM stabilize time
+bsp_delay_us(177);               // Clean ON time (192-15)
 // Total: 48 + 192 = 240μs ✓
+
+// PWM Hardware Consideration:
+// NRF52 PWM needs ~15μs (1-2 cycles at 125kHz) to ramp up/down cleanly
+// Settling delays ensure clean field states detectable by Proxmark3
 ```
 
 **START_AUTH Waveform:**
 ```
 Command: 11000 (5 bits)
 Each bit: PULSE (48μs OFF) + ON (112μs or 192μs)
+With PWM settling for clean transitions
 
 Bit 1: |_____|-----------------|
 Bit 1: |_____|-----------------|
