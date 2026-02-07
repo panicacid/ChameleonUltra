@@ -6,6 +6,7 @@ This project uses the changelog in accordance with [keepchangelog](http://keepac
  - Added Hitag/Hitag2/Paxton Hitag2 LF protocol support with BPLM encoding
  - Implemented correct BPLM (Binary Pulse Length Modulation) with OFF-then-ON pattern
  - Added timeslot API integration for precision timing without BLE interference
+ - Field initialized inside timeslot callback (matches T55xx pattern) with 10ms duration
  - Added `lf hitag hitag2 read` command to scan Hitag2 tags
  - Added `lf hitag hitag2 write` command to write Hitag2 UID to T55xx tags
  - Added `lf hitag hitag2 econfig` command for Hitag2 emulation configuration

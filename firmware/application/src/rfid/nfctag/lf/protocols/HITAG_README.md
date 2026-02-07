@@ -57,6 +57,7 @@ Bit 1: OFF(48μs) + ON(192μs) = 240μs
 - Total bit timing: 160μs (bit 0), 240μs (bit 1) per Hitag2 spec
 - START_AUTH command transmission (5 bits: 11000)
 - **Timeslot API integration** for precision timing without BLE interference
+- **Field started INSIDE timeslot callback** (10ms duration, matches T55xx pattern)
 - **Timing verified** against Proxmark3 hitag2.c implementation
 - **Should be detectable** by Proxmark3 sniffer (ready for hardware testing)
 
@@ -273,15 +274,25 @@ Bit 0: |_____|-----------|
 **Timeslot Integration:**
 ```c
 // Use timeslot API for time-critical transmission
+// Field started INSIDE timeslot (matches T55xx pattern)
 static void hitag2_timeslot_callback(void) {
-    bsp_delay_us(2504);  // Powerup wait
-    bsp_delay_us(464);   // START_AUTH window
-    hitag2_send_start_auth();  // Transmit with BPLM
+    start_lf_125khz_radio();  // Initialize field HERE
+    bsp_delay_us(2504);       // Powerup wait
+    bsp_delay_us(464);        // START_AUTH window
+    hitag2_send_start_auth(); // Transmit with BPLM
 }
 
 // In hitag2_read():
-start_lf_125khz_radio();  // Power tag
-request_timeslot(5000, hitag2_timeslot_callback);
+// Field NOT started before timeslot - all control inside callback
+request_timeslot(10000, hitag2_timeslot_callback);  // 10ms duration
+
+// Timing breakdown:
+// Powerup:       2.5ms
+// Auth window:   0.464ms
+// Transmission:  0.96ms
+// Response wait: 1.6ms
+// Total needed:  ~5.5ms
+// Timeslot:      10ms (provides 4.5ms margin)
 ```
 
 **Manchester Decoding (Tag Response):**
