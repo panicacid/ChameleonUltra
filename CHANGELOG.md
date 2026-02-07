@@ -3,11 +3,13 @@ All notable changes to this project will be documented in this file.
 This project uses the changelog in accordance with [keepchangelog](http://keepachangelog.com/). Please use this to write notable changes, which is not the same as git commit log...
 
 ## [unreleased][unreleased]
- - Added Hitag/Hitag2/Paxton Hitag2 LF protocol support with BPLM field modulation
+ - Added Hitag/Hitag2/Paxton Hitag2 LF protocol support with BPLM encoding
+ - Implemented correct BPLM (Binary Pulse Length Modulation) with OFF-then-ON pattern
+ - Added timeslot API integration for precision timing without BLE interference
  - Added `lf hitag hitag2 read` command to scan Hitag2 tags
  - Added `lf hitag hitag2 write` command to write Hitag2 UID to T55xx tags
  - Added `lf hitag hitag2 econfig` command for Hitag2 emulation configuration
- - Implemented BPLM (Bi-Phase Mark) ON/OFF field modulation for Reader-Talk-First protocol
+ - Implemented BPLM field modulation matching Proxmark3 implementation (48μs pulse, 112/192μs ON)
  - Added Hitag2 firmware command handlers (scan, write to T55xx, set/get emulation ID)
  - Fix bad missing tools warning (@suut)
  - Fix for FAST_READ command for nfc - mf0 tags
