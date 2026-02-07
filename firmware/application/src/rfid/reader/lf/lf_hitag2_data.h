@@ -9,42 +9,47 @@ extern "C" {
 #endif
 
 /**
- * Hitag2 BPLM Timing Constants
+ * Hitag2 BPLM (Binary Pulse Length Modulation) Timing Constants
  * 
- * BPLM (Bi-Phase Mark) encoding timing per Hitag2 specification:
- * - Bit 0: Total duration 160μs (20 Tc @ 125kHz)
- * - Bit 1: Total duration 240μs (30 Tc @ 125kHz)
+ * Based on Proxmark3 hitag2.c and Hitag2 specification.
+ * At 125kHz: 1 carrier period (Tc) = 8μs
  * 
- * Implementation uses gap modulation:
- * - Field stays ON for most of bit duration
- * - Brief gaps (field OFF) create transitions
- * - HIGH_TIME + GAP_TIME = TOTAL_TIME
+ * BPLM encoding: Each bit starts with PULSE (field OFF), then field ON
+ * - Bit value is encoded in the length of the ON period
+ * - NOT gap modulation (that's T55xx)
+ * - Pattern: |___PULSE___|------ON------|
  * 
- * Example for Bit 0:
- *   HITAG2_BPLM_BIT0_HIGH_US (140) + HITAG2_BPLM_LOW_TIME (20) = 160μs ✓
+ * From Proxmark3:
+ *   #define HITAG_T_LOW  6   // T_LOW should be 4..10 carrier periods
+ *   #define HITAG_T_0    20  // T[0] should be 18..22 carrier periods  
+ *   #define HITAG_T_1    30  // T[1] should be 26..30 carrier periods
+ * 
+ * Timing breakdown:
+ *   Bit 0: OFF(48μs/6Tc) + ON(112μs/14Tc) = 160μs/20Tc total
+ *   Bit 1: OFF(48μs/6Tc) + ON(192μs/24Tc) = 240μs/30Tc total
  */
 
-// Gap (LOW) duration - when field is OFF
-#define HITAG2_BPLM_LOW_TIME    20   // 20μs gap duration
+// Fixed pulse (OFF) duration for all bits
+#define HITAG2_BPLM_PULSE_US     48   // 6 Tc = 48μs (field OFF)
 
-// Bit 0 timing: HIGH + LOW = 160μs total
-#define HITAG2_BPLM_0_TIME      160  // Total duration for bit 0
-#define HITAG2_BPLM_BIT0_HIGH_US (HITAG2_BPLM_0_TIME - HITAG2_BPLM_LOW_TIME)  // 140μs
+// Total bit durations per Hitag2 specification
+#define HITAG2_BPLM_0_TIME       160  // 20 Tc = 160μs (bit 0 total)
+#define HITAG2_BPLM_1_TIME       240  // 30 Tc = 240μs (bit 1 total)
 
-// Bit 1 timing: HIGH + LOW + HIGH + LOW = 240μs total
-#define HITAG2_BPLM_1_TIME      240  // Total duration for bit 1
-#define HITAG2_BPLM_BIT1_HIGH_US ((HITAG2_BPLM_1_TIME - 2*HITAG2_BPLM_LOW_TIME) / 2)  // 100μs per segment
+// Calculated ON times: TOTAL - PULSE = ON_TIME
+#define HITAG2_BPLM_BIT0_HIGH_US (HITAG2_BPLM_0_TIME - HITAG2_BPLM_PULSE_US)  // 112μs (14 Tc)
+#define HITAG2_BPLM_BIT1_HIGH_US (HITAG2_BPLM_1_TIME - HITAG2_BPLM_PULSE_US)  // 192μs (24 Tc)
 
 /**
- * Read Hitag2 tag UID
+ * Read Hitag2 tag UID using RTF protocol with BPLM encoding
  * 
  * @param data      Buffer to store the 4-byte UID
  * @param timeout_ms Timeout in milliseconds
  * @return true if tag was read successfully, false otherwise
  * 
- * Note: Hitag2 is a Reader-Talk-First (RTF) protocol that requires
- * active interrogation. This is different from Tag-Talk-First protocols
- * like EM410x where the tag continuously broadcasts.
+ * Note: Hitag2 is a Reader-Talk-First (RTF) protocol using BPLM encoding.
+ * This requires active interrogation with precise timing, implemented using
+ * the timeslot API to prevent BLE interference.
  */
 bool hitag2_read(uint8_t *data, uint32_t timeout_ms);
 

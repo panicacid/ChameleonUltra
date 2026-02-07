@@ -6,6 +6,7 @@
 #include "lf_125khz_radio.h"
 #include "lf_reader_data.h"
 #include "protocols/hitag.h"
+#include "timeslot.h"
 
 #define NRF_LOG_MODULE_NAME hitag2_reader
 #include "nrf_log.h"
@@ -52,72 +53,55 @@ static void uninit_hitag2_hw(void) {
 }
 
 /**
- * Send a gap (field OFF briefly) like T55xx
- * This creates a detectable transition in the field.
- * The gap is part of the total bit duration, not additional time.
+ * Send a single bit using correct BPLM encoding
  * 
- * @param gap_us Duration to keep field OFF (in microseconds)
- */
-static void hitag2_send_gap(uint32_t gap_us) {
-    stop_lf_125khz_radio();
-    bsp_delay_us(gap_us);
-    start_lf_125khz_radio();
-}
-
-/**
- * Send a single bit using BPLM encoding via gap modulation
+ * BPLM (Binary Pulse Length Modulation) from Proxmark3 hitag2.c:
+ * - Each bit starts with a PULSE (field OFF/dropped)
+ * - Followed by field ON for variable duration
+ * - Bit value encoded in the ON duration
  * 
- * BPLM encoding adapted for ChameleonUltra hardware:
- * - Field stays ON most of the time (powers tag)
- * - Transitions created by brief gaps (field OFF)
+ * Pattern: |___PULSE___|------ON------|
  * 
  * Bit 0 timing (160μs total per spec):
- *   - Field ON: HITAG2_BPLM_BIT0_HIGH_US (140μs)
- *   - Gap OFF:  HITAG2_BPLM_LOW_TIME (20μs)
- *   - TOTAL: 140 + 20 = 160μs ✓
+ *   - Pulse OFF: HITAG2_BPLM_PULSE_US (48μs = 6 Tc)
+ *   - Field ON:  HITAG2_BPLM_BIT0_HIGH_US (112μs = 14 Tc)
+ *   - TOTAL: 48 + 112 = 160μs = 20 Tc ✓
  * 
  * Bit 1 timing (240μs total per spec):
- *   - Field ON: HITAG2_BPLM_BIT1_HIGH_US (100μs)
- *   - Gap OFF:  HITAG2_BPLM_LOW_TIME (20μs)
- *   - Field ON: HITAG2_BPLM_BIT1_HIGH_US (100μs)
- *   - Gap OFF:  HITAG2_BPLM_LOW_TIME (20μs)
- *   - TOTAL: 100 + 20 + 100 + 20 = 240μs ✓
+ *   - Pulse OFF: HITAG2_BPLM_PULSE_US (48μs = 6 Tc)
+ *   - Field ON:  HITAG2_BPLM_BIT1_HIGH_US (192μs = 24 Tc)
+ *   - TOTAL: 48 + 192 = 240μs = 30 Tc ✓
  * 
- * This approach works like T55xx writing (proven working).
- * Much more reliable than rapid PWM start/stop toggling.
+ * This matches Proxmark3's hitag2_reader_send_bit() exactly.
  * 
  * @param bit The bit value (0 or 1)
  */
 static void hitag2_send_bit(uint8_t bit) {
+    // Start with PULSE (field OFF) - this is the BPLM signature
+    stop_lf_125khz_radio();
+    bsp_delay_us(HITAG2_BPLM_PULSE_US);  // 48μs OFF (6 Tc)
+    
+    // Then field ON for duration that encodes the bit value
+    start_lf_125khz_radio();
     if (bit & 0x01) {
-        // Bit 1: Two transitions (two gaps)
-        // First half: Field ON
-        bsp_delay_us(HITAG2_BPLM_BIT1_HIGH_US);  // 100μs
-        // First gap (transition 1)
-        hitag2_send_gap(HITAG2_BPLM_LOW_TIME);   // 20μs
-        // Second half: Field ON
-        bsp_delay_us(HITAG2_BPLM_BIT1_HIGH_US);  // 100μs
-        // Second gap (transition 2)
-        hitag2_send_gap(HITAG2_BPLM_LOW_TIME);   // 20μs
-        // TOTAL: 100 + 20 + 100 + 20 = 240μs
+        // Bit 1: Longer ON time
+        bsp_delay_us(HITAG2_BPLM_BIT1_HIGH_US);  // 192μs ON (24 Tc)
     } else {
-        // Bit 0: One transition (one gap)
-        // Field ON for most of bit duration
-        bsp_delay_us(HITAG2_BPLM_BIT0_HIGH_US);  // 140μs
-        // Single gap (transition)
-        hitag2_send_gap(HITAG2_BPLM_LOW_TIME);   // 20μs
-        // TOTAL: 140 + 20 = 160μs
+        // Bit 0: Shorter ON time
+        bsp_delay_us(HITAG2_BPLM_BIT0_HIGH_US);  // 112μs ON (14 Tc)
     }
 }
 
 /**
  * Send START_AUTH command (5 bits: 11000)
  * This initiates communication with tag in public mode
+ * 
+ * Called within timeslot for precise timing
  */
 static void hitag2_send_start_auth(void) {
     uint8_t cmd = HITAG2_START_AUTH_CMD;
     
-    NRF_LOG_INFO("Transmitting START_AUTH with gap modulation...");
+    NRF_LOG_INFO("Transmitting START_AUTH with BPLM encoding...");
     
     // Send 5 bits MSB first: 1, 1, 0, 0, 0
     // Bit positions in 0xC0 (11000000):
@@ -127,25 +111,47 @@ static void hitag2_send_start_auth(void) {
         hitag2_send_bit(bit);
     }
     
+    // Field is now ON (last operation was start_lf_125khz_radio)
+    // Keep it ON for tag response
+    
     NRF_LOG_INFO("START_AUTH transmission complete");
+}
+
+/**
+ * Timeslot callback for time-critical BPLM transmission
+ * This is called within a radio timeslot with interrupts disabled
+ */
+static void hitag2_timeslot_callback(void) {
+    // Wait for tag to power up (2.5ms)
+    bsp_delay_us(HITAG_T_WAIT_POWERUP_US);
+    
+    // Wait to be in START_AUTH window (464μs)
+    bsp_delay_us(HITAG_T_WAIT_START_AUTH_US);
+    
+    // Send START_AUTH command with correct BPLM encoding
+    // Field was started before timeslot, so it's ON now
+    hitag2_send_start_auth();
+    
+    // Field is now ON after transmission
+    // Tag can respond with UID
 }
 
 /**
  * Attempt to read Hitag2 tag UID using RTF protocol
  * 
  * Protocol flow adapted for ChameleonUltra hardware:
- * 1. Start field to power tag (like all LF protocols)
- * 2. Wait for tag powerup
- * 3. Send START_AUTH command via field modulation (like T55xx)
- * 4. Receive Manchester response via GPIO interrupts (like EM410x)
+ * 1. Start field to power tag
+ * 2. Request timeslot for time-critical BPLM transmission
+ * 3. Send START_AUTH with correct OFF-then-ON BPLM pattern
+ * 4. Receive Manchester response via GPIO interrupts
  * 
  * Based on:
- * - Proxmark3 hitag2.c for protocol timing
- * - ChameleonUltra T55xx for transmission method
+ * - Proxmark3 hitag2.c for BPLM encoding and timing
+ * - ChameleonUltra T55xx for timeslot usage
  * - ChameleonUltra EM410x for reception method
  */
 bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
-    NRF_LOG_INFO("Hitag2 RTF protocol with gap modulation starting...");
+    NRF_LOG_INFO("Hitag2 RTF protocol with correct BPLM encoding starting...");
     
     // Allocate codec for Manchester decoding (tag response)
     void *codec = hitag2.alloc();
@@ -162,24 +168,20 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     init_hitag2_hw();
     
     // Start LF field - this powers the tag and lights LED
+    // Field must be ON before entering timeslot
     start_lf_125khz_radio();
     
-    // Step 1: Wait for tag to power up (2.5ms)
-    NRF_LOG_INFO("Waiting for tag powerup...");
-    bsp_delay_us(HITAG_T_WAIT_POWERUP_US);
+    NRF_LOG_INFO("Requesting timeslot for precise BPLM transmission...");
     
-    // Step 2: Wait to be in START_AUTH window (464μs)
-    bsp_delay_us(HITAG_T_WAIT_START_AUTH_US);
+    // Request timeslot for time-critical transmission
+    // This ensures precise timing without BLE interference
+    // Duration: 5ms (powerup + auth window + transmission + margin)
+    request_timeslot(5000, hitag2_timeslot_callback);
     
-    // Step 3: Send START_AUTH command (5 bits: 11000) with gap modulation
-    // Field is already ON, gaps will create transitions
-    NRF_LOG_INFO("Sending START_AUTH with gap modulation...");
-    hitag2_send_start_auth();
+    NRF_LOG_INFO("START_AUTH transmitted with correct BPLM");
     
-    // Field should be ON after transmission (last operation was send_gap which ends with field ON)
-    // No need to check field state
-    
-    // Step 4: Wait for tag response
+    // Field is now ON after timeslot
+    // Wait for tag response
     bsp_delay_us(HITAG_T_WAIT_RESPONSE_US);
     
     // Step 5: Try to decode response (32-bit UID, Manchester encoded)
