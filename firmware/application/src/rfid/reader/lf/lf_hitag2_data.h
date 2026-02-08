@@ -31,38 +31,39 @@ extern "C" {
  *   - Ring-down duration: 21μs
  *   - Ring-down amplitude: 34.95mV (18.3% of 190.9mV carrier)
  *   - PM3 zero-crossing detector sees ring-down as "carrier present"
- *   - Result: Only 18μs clean gap detected (need 48μs)
- * 
- * Solution: Extend pulse time to compensate for ring-down
- *   - Total pulse: 69μs = 21μs (ring-down) + 48μs (clean gap)
- *   - PM3 now sees required 48μs clean gap ✓
  * 
  * PWM Overhead Compensation (PicoScope Analysis #2)
  * ==================================================
  * Measured actual bit timing (falling edge to falling edge):
- *   - Bit 1 measured: 250.4μs (should be 240μs)
+ *   - Bit 1 measured: 250.4μs (should be 240μs per spec)
+ *   - Total measured: 978μs (should be 928μs per HT2protocol.pdf)
  *   - Overhead: ~10μs from PWM start/stop execution time
  * 
- * Solution: Reduce ON times by 10μs to compensate
- *   - Keep pulse at 69μs (critical for ring-down)
- *   - Reduce HIGH times to account for PWM overhead
+ * HT2protocol.pdf Specification Calibration (Final)
+ * ==================================================
+ * Cross-referenced spec with measurements:
+ *   - Bit 0 spec: 160μs (20 Tc) ✓
+ *   - Bit 1 spec: 224μs (28 Tc) NOT 240μs!
+ *   - START_AUTH total: 2×224 + 3×160 = 928μs
  * 
- * Final compensated timing:
- *   Bit 0: OFF(69μs) + ON(81μs) = 150μs theory → ~160μs actual ✓
- *   Bit 1: OFF(69μs) + ON(161μs) = 230μs theory → ~240μs actual ✓
+ * Final spec-calibrated timing:
+ *   Pulse: 58μs (tightened from 69μs, covers ~21μs ring-down + 37μs clean)
+ *   Bit 0: OFF(58μs) + ON(92μs) = 150μs theory → ~160μs actual ✓
+ *   Bit 1: OFF(58μs) + ON(156μs) = 214μs theory → ~224μs actual ✓
+ *   Total: 2×224 + 3×160 = 928μs (exact spec compliance) ✓
  */
 
-// Fixed pulse (OFF) duration - COMPENSATED FOR RING-DOWN
-#define HITAG2_BPLM_PULSE_US     69   // 48μs spec + 21μs ring-down compensation
+// Fixed pulse (OFF) duration - SPEC-CALIBRATED
+#define HITAG2_BPLM_PULSE_US     58   // Tightened to match spec (21μs ring-down + 37μs clean)
 
-// Total bit durations per Hitag2 specification
+// Total bit durations per HT2protocol.pdf specification
 #define HITAG2_BPLM_0_TIME       160  // 20 Tc = 160μs (bit 0 total)
-#define HITAG2_BPLM_1_TIME       240  // 30 Tc = 240μs (bit 1 total)
+#define HITAG2_BPLM_1_TIME       224  // 28 Tc = 224μs (bit 1 total) - SPEC NOT 240!
 
-// Calculated ON times: Compensated for both ring-down AND PWM overhead
-// Theory: TOTAL - PULSE - OVERHEAD, but we subtract from ON time to get actual = spec
-#define HITAG2_BPLM_BIT0_HIGH_US 81   // 69 + 81 = 150μs theory → ~160μs actual (10μs overhead)
-#define HITAG2_BPLM_BIT1_HIGH_US 161  // 69 + 161 = 230μs theory → ~240μs actual (10μs overhead)
+// Calculated ON times: Spec-calibrated with PWM overhead compensation
+// Formula: TARGET - PULSE - OVERHEAD, subtract from ON time to compensate
+#define HITAG2_BPLM_BIT0_HIGH_US 92   // 58 + 92 = 150μs theory → ~160μs actual (10μs overhead)
+#define HITAG2_BPLM_BIT1_HIGH_US 156  // 58 + 156 = 214μs theory → ~224μs actual (10μs overhead)
 
 // PWM hardware settling time
 // NRF52 PWM needs time to ramp up/down cleanly (~1-2 PWM cycles at 125kHz = 8-16μs)
