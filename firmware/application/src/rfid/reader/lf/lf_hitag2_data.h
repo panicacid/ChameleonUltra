@@ -24,21 +24,34 @@ extern "C" {
  *   #define HITAG_T_0    20  // T[0] should be 18..22 carrier periods  
  *   #define HITAG_T_1    30  // T[1] should be 26..30 carrier periods
  * 
- * Timing breakdown:
- *   Bit 0: OFF(48μs/6Tc) + ON(112μs/14Tc) = 160μs/20Tc total
- *   Bit 1: OFF(48μs/6Tc) + ON(192μs/24Tc) = 240μs/30Tc total
+ * CRITICAL: Antenna Ring-Down Compensation (PicoScope Analysis)
+ * ============================================================
+ * When PWM stops, the LC antenna circuit rings down (damped oscillation).
+ * PicoScope measurements on ChameleonUltra hardware:
+ *   - Ring-down duration: 21μs
+ *   - Ring-down amplitude: 34.95mV (18.3% of 190.9mV carrier)
+ *   - PM3 zero-crossing detector sees ring-down as "carrier present"
+ *   - Result: Only 18μs clean gap detected (need 48μs)
+ * 
+ * Solution: Extend pulse time to compensate for ring-down
+ *   - Total pulse: 69μs = 21μs (ring-down) + 48μs (clean gap)
+ *   - PM3 now sees required 48μs clean gap ✓
+ * 
+ * Compensated timing breakdown:
+ *   Bit 0: OFF(69μs compensated) + ON(91μs) = 160μs/20Tc total
+ *   Bit 1: OFF(69μs compensated) + ON(171μs) = 240μs/30Tc total
  */
 
-// Fixed pulse (OFF) duration for all bits
-#define HITAG2_BPLM_PULSE_US     48   // 6 Tc = 48μs (field OFF)
+// Fixed pulse (OFF) duration - COMPENSATED FOR RING-DOWN
+#define HITAG2_BPLM_PULSE_US     69   // 48μs spec + 21μs ring-down compensation
 
 // Total bit durations per Hitag2 specification
 #define HITAG2_BPLM_0_TIME       160  // 20 Tc = 160μs (bit 0 total)
 #define HITAG2_BPLM_1_TIME       240  // 30 Tc = 240μs (bit 1 total)
 
-// Calculated ON times: TOTAL - PULSE = ON_TIME
-#define HITAG2_BPLM_BIT0_HIGH_US (HITAG2_BPLM_0_TIME - HITAG2_BPLM_PULSE_US)  // 112μs (14 Tc)
-#define HITAG2_BPLM_BIT1_HIGH_US (HITAG2_BPLM_1_TIME - HITAG2_BPLM_PULSE_US)  // 192μs (24 Tc)
+// Calculated ON times: TOTAL - PULSE = ON_TIME (compensated for ring-down)
+#define HITAG2_BPLM_BIT0_HIGH_US (HITAG2_BPLM_0_TIME - HITAG2_BPLM_PULSE_US)  // 91μs (was 112μs)
+#define HITAG2_BPLM_BIT1_HIGH_US (HITAG2_BPLM_1_TIME - HITAG2_BPLM_PULSE_US)  // 171μs (was 192μs)
 
 // PWM hardware settling time
 // NRF52 PWM needs time to ramp up/down cleanly (~1-2 PWM cycles at 125kHz = 8-16μs)
