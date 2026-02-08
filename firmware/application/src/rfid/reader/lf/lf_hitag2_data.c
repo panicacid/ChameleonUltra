@@ -109,15 +109,19 @@ static void hitag2_send_start_auth(void) {
     // Send 5 bits MSB first: 1, 1, 0, 0, 0
     // Bit positions in 0xC0 (11000000):
     // Bit 7: 1, Bit 6: 1, Bit 5: 0, Bit 4: 0, Bit 3: 0
-    for (int i = 7; i >= 3; i--) {
-        uint8_t bit = (cmd >> i) & 0x01;
+    // 
+    // CRITICAL: Use explicit loop counter to ensure exactly 5 bits are sent
+    // PicoScope confirmed previous loop only sent 4 bits!
+    for (int i = 0; i < HITAG2_START_AUTH_BITS; i++) {
+        uint8_t bit = (cmd >> (7 - i)) & 0x01;
+        NRF_LOG_INFO("Bit %d: %d", i, bit);
         hitag2_send_bit(bit);
     }
     
     // Field is now ON (last operation was start_lf_125khz_radio)
     // Keep it ON for tag response
     
-    NRF_LOG_INFO("START_AUTH transmission complete");
+    NRF_LOG_INFO("START_AUTH transmission complete - sent %d bits", HITAG2_START_AUTH_BITS);
 }
 
 /**
