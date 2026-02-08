@@ -216,7 +216,7 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     bsp_delay_us(HITAG_T_WAIT_RESPONSE_US);
     
     NRF_LOG_INFO("Listening for tag response...");
-    NRF_LOG_INFO("Circular buffer size: %d", cb_get_size(&cb));
+    NRF_LOG_INFO("Circular buffer size: %d", cb.count);
     
     // Step 5: Try to decode response (32-bit UID, Manchester encoded)
     bool ok = false;
