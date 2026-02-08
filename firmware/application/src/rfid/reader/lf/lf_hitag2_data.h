@@ -37,9 +37,19 @@ extern "C" {
  *   - Total pulse: 69μs = 21μs (ring-down) + 48μs (clean gap)
  *   - PM3 now sees required 48μs clean gap ✓
  * 
- * Compensated timing breakdown:
- *   Bit 0: OFF(69μs compensated) + ON(91μs) = 160μs/20Tc total
- *   Bit 1: OFF(69μs compensated) + ON(171μs) = 240μs/30Tc total
+ * PWM Overhead Compensation (PicoScope Analysis #2)
+ * ==================================================
+ * Measured actual bit timing (falling edge to falling edge):
+ *   - Bit 1 measured: 250.4μs (should be 240μs)
+ *   - Overhead: ~10μs from PWM start/stop execution time
+ * 
+ * Solution: Reduce ON times by 10μs to compensate
+ *   - Keep pulse at 69μs (critical for ring-down)
+ *   - Reduce HIGH times to account for PWM overhead
+ * 
+ * Final compensated timing:
+ *   Bit 0: OFF(69μs) + ON(81μs) = 150μs theory → ~160μs actual ✓
+ *   Bit 1: OFF(69μs) + ON(161μs) = 230μs theory → ~240μs actual ✓
  */
 
 // Fixed pulse (OFF) duration - COMPENSATED FOR RING-DOWN
@@ -49,9 +59,10 @@ extern "C" {
 #define HITAG2_BPLM_0_TIME       160  // 20 Tc = 160μs (bit 0 total)
 #define HITAG2_BPLM_1_TIME       240  // 30 Tc = 240μs (bit 1 total)
 
-// Calculated ON times: TOTAL - PULSE = ON_TIME (compensated for ring-down)
-#define HITAG2_BPLM_BIT0_HIGH_US (HITAG2_BPLM_0_TIME - HITAG2_BPLM_PULSE_US)  // 91μs (was 112μs)
-#define HITAG2_BPLM_BIT1_HIGH_US (HITAG2_BPLM_1_TIME - HITAG2_BPLM_PULSE_US)  // 171μs (was 192μs)
+// Calculated ON times: Compensated for both ring-down AND PWM overhead
+// Theory: TOTAL - PULSE - OVERHEAD, but we subtract from ON time to get actual = spec
+#define HITAG2_BPLM_BIT0_HIGH_US 81   // 69 + 81 = 150μs theory → ~160μs actual (10μs overhead)
+#define HITAG2_BPLM_BIT1_HIGH_US 161  // 69 + 161 = 230μs theory → ~240μs actual (10μs overhead)
 
 // PWM hardware settling time
 // NRF52 PWM needs time to ramp up/down cleanly (~1-2 PWM cycles at 125kHz = 8-16μs)
