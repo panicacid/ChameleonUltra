@@ -180,23 +180,18 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
             }
             
             if (edge_detected) {
-                // CRITICAL FIX: Convert sample intervals to microseconds
-                // Assuming SAADC samples at ~20kHz = 50µs per sample
-                const uint32_t SAMPLE_PERIOD_US = 50;
-                
                 // Calculate interval in sample units
                 int sample_interval = i - last_edge_index;
                 
-                // Convert to microseconds
-                uint32_t interval_us = sample_interval * SAMPLE_PERIOD_US;
-                
-                // Cap at 0xFF like circular buffer does
-                intervals[interval_count++] = (interval_us > 0xFF) ? 0xFF : (uint16_t)interval_us;
+                // Store raw sample interval (NOT in µs!)
+                // Manchester decoder expects relative interval values, not absolute µs
+                // Sample intervals should be in the range matching decoder thresholds (48, 112)
+                intervals[interval_count++] = (sample_interval > 0xFF) ? 0xFF : (uint16_t)sample_interval;
                 last_edge_index = i;
                 
                 if (interval_count <= 10) {
-                    NRF_LOG_INFO("Edge %d at sample %d, interval=%d samples (%d µs)", 
-                                 interval_count, i, sample_interval, interval_us);
+                    NRF_LOG_INFO("Edge %d at sample %d, interval=%d samples", 
+                                 interval_count, i, sample_interval);
                 }
             }
         }
