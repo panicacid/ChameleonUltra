@@ -3,6 +3,7 @@
 #include "bsp_delay.h"
 #include "bsp_time.h"
 #include "circular_buffer.h"
+#include "hw_connect.h"
 #include "lf_125khz_radio.h"
 #include "lf_reader_data.h"
 #include "protocols/hitag.h"
@@ -161,20 +162,29 @@ static int g_polled_edge_count = 0;
 static int hitag2_poll_gpio_response(uint16_t *buffer, int max_edges, uint32_t timeout_us) {
     uint32_t pin = LF_OA_OUT;
     uint32_t last_state = nrf_gpio_pin_read(pin);
-    uint32_t start_time = bsp_get_sys_tick_us();
+    
+    // Use the LF timer for timing (same as used for GPIO interrupts)
+    clear_lf_counter_value();
+    uint32_t start_time = get_lf_counter_value();
     uint32_t last_edge_time = start_time;
     int edge_count = 0;
     
     NRF_LOG_INFO("Polling GPIO for response (timeout: %d µs)...", timeout_us);
     
     // Poll GPIO pin directly until timeout or buffer full
-    while ((bsp_get_sys_tick_us() - start_time) < timeout_us && edge_count < max_edges) {
+    while (edge_count < max_edges) {
+        uint32_t current_time = get_lf_counter_value();
+        
+        // Check timeout
+        if ((current_time - start_time) >= timeout_us) {
+            break;
+        }
+        
         uint32_t current_state = nrf_gpio_pin_read(pin);
         
         // Edge detected (state change)
         if (current_state != last_state) {
-            uint32_t now = bsp_get_sys_tick_us();
-            uint32_t interval = now - last_edge_time;
+            uint32_t interval = current_time - last_edge_time;
             
             // Cap interval at 0xFF like circular buffer does
             buffer[edge_count++] = (interval > 0xFF) ? 0xFF : (uint16_t)interval;
@@ -184,7 +194,7 @@ static int hitag2_poll_gpio_response(uint16_t *buffer, int max_edges, uint32_t t
                 NRF_LOG_DEBUG("Polled edge #%d: interval=%d µs", edge_count - 1, buffer[edge_count - 1]);
             }
             
-            last_edge_time = now;
+            last_edge_time = current_time;
             last_state = current_state;
         }
     }
