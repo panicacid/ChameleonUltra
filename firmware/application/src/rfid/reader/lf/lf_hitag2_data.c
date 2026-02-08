@@ -134,6 +134,59 @@ static void hitag2_send_start_auth(void) {
 }
 
 /**
+ * Edge detection layer: Convert SAADC samples to Manchester intervals
+ * 
+ * Manchester decoder expects time intervals between edges, but SAADC gives
+ * voltage samples. This function detects threshold crossings (edges) and
+ * calculates intervals between them.
+ * 
+ * @param samples Array of SAADC samples (0-4095, 12-bit)
+ * @param sample_count Number of samples
+ * @param intervals Output array for calculated intervals
+ * @param max_intervals Maximum intervals to store
+ * @return Number of intervals detected
+ */
+static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
+                                           uint16_t *intervals, int max_intervals) {
+    // Threshold: 600mV = (600/3300) * 4095 = 745 ADC units
+    // User measurements: LOW=434mV(~538), HIGH=740mV(~920)
+    const uint16_t threshold = 745;
+    
+    int16_t last_sample = -1;
+    int last_edge_index = 0;
+    int interval_count = 0;
+    
+    for (int i = 0; i < sample_count && interval_count < max_intervals; i++) {
+        if (last_sample >= 0) {
+            // Detect threshold crossing (edge)
+            bool edge_detected = false;
+            if (last_sample < threshold && samples[i] >= threshold) {
+                // Rising edge (LOW → HIGH)
+                edge_detected = true;
+            } else if (last_sample >= threshold && samples[i] < threshold) {
+                // Falling edge (HIGH → LOW)
+                edge_detected = true;
+            }
+            
+            if (edge_detected) {
+                // Calculate interval (in sample units)
+                int interval = i - last_edge_index;
+                // Cap at 0xFF like circular buffer does
+                intervals[interval_count++] = (interval > 0xFF) ? 0xFF : (uint16_t)interval;
+                last_edge_index = i;
+                
+                NRF_LOG_DEBUG("Edge %d at sample %d, interval=%d", 
+                             interval_count, i, interval);
+            }
+        }
+        last_sample = samples[i];
+    }
+    
+    NRF_LOG_INFO("Detected %d edges from %d samples", interval_count, sample_count);
+    return interval_count;
+}
+
+/**
  * Timeslot callback for time-critical BPLM transmission
  * This is called within a radio timeslot for precise timing
  * 
@@ -165,15 +218,16 @@ static void hitag2_timeslot_callback(void) {
  * 1. Start field to power tag
  * 2. Request timeslot for time-critical BPLM transmission
  * 3. Send START_AUTH with correct OFF-then-ON BPLM pattern
- * 4. Receive Manchester response via GPIO interrupts
+ * 4. Receive Manchester response via SAADC sampling
+ * 5. Detect edges from samples and feed intervals to decoder
  * 
  * Based on:
  * - Proxmark3 hitag2.c for BPLM encoding and timing
  * - ChameleonUltra T55xx for timeslot usage
- * - ChameleonUltra EM410x for reception method
+ * - ChameleonUltra HID for SAADC sampling
  */
 bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
-    NRF_LOG_INFO("Hitag2 START_AUTH with SAADC sampling (like HID)");
+    NRF_LOG_INFO("Hitag2 START_AUTH with SAADC sampling + edge detection");
     
     // Allocate codec for Manchester decoding (tag response)
     void *codec = hitag2.alloc();
@@ -192,32 +246,61 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     // Request timeslot for transmission
     request_timeslot(15000, hitag2_timeslot_callback);
     
-    NRF_LOG_INFO("START_AUTH transmitted, processing SAADC samples...");
+    NRF_LOG_INFO("START_AUTH transmitted, collecting SAADC samples...");
     
-    // Process SAADC samples from circular buffer (like HID does)
-    bool ok = false;
-    autotimer *p_at = bsp_obtain_timer(0);
-    while (!ok && NO_TIMEOUT_1MS(p_at, timeout_ms)) {
-        uint16_t val = 0;
-        while (!ok && NO_TIMEOUT_1MS(p_at, timeout_ms) && cb_pop_front(&cb, &val)) {
-            if (hitag2.decoder.feed(codec, val)) {
-                memcpy(data, hitag2.get_data(codec), hitag2.data_size);
-                ok = true;
-                NRF_LOG_INFO("SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
-                            data[0], data[1], data[2], data[3]);
-                break;
-            }
+    // Wait briefly for samples to accumulate
+    bsp_delay_ms(20);
+    
+    // Collect all SAADC samples from circular buffer
+    uint16_t samples[256];
+    int sample_count = 0;
+    uint16_t val = 0;
+    while (cb_pop_front(&cb, &val) && sample_count < 256) {
+        samples[sample_count++] = val;
+        
+        // Log first 20 samples for debugging
+        if (sample_count <= 20) {
+            // Convert to millivolts: (sample / 4095) * 3300
+            uint32_t mv = (val * 3300) / 4095;
+            NRF_LOG_DEBUG("Sample[%d]: %d (~%dmV)", sample_count-1, val, mv);
         }
     }
     
-    bsp_return_timer(p_at);
+    NRF_LOG_INFO("Collected %d SAADC samples, detecting edges...", sample_count);
+    
+    // Detect edges and get intervals
+    uint16_t intervals[128];
+    int edge_count = hitag2_detect_edges_from_saadc(samples, sample_count, intervals, 128);
+    
+    if (edge_count == 0) {
+        NRF_LOG_WARNING("No edges detected from samples - check signal levels");
+        stop_lf_125khz_radio();
+        uninit_hitag2_hw();
+        cb_free(&cb);
+        hitag2.free(codec);
+        return false;
+    }
+    
+    // Feed intervals to Manchester decoder
+    bool ok = false;
+    for (int i = 0; i < edge_count; i++) {
+        if (hitag2.decoder.feed(codec, intervals[i])) {
+            memcpy(data, hitag2.get_data(codec), hitag2.data_size);
+            ok = true;
+            NRF_LOG_INFO("SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
+                        data[0], data[1], data[2], data[3]);
+            break;
+        }
+    }
+    
     stop_lf_125khz_radio();
     uninit_hitag2_hw();
     cb_free(&cb);
     hitag2.free(codec);
     
     if (!ok) {
-        NRF_LOG_INFO("Hitag2 tag not found - no valid UID decoded from SAADC samples");
+        NRF_LOG_INFO("Hitag2 tag not found - %d edges detected but decode failed", edge_count);
+        NRF_LOG_INFO("Try adjusting tag position or check Manchester thresholds");
     }
     
     return ok;
