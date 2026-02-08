@@ -7,6 +7,7 @@
 #include "lf_reader_data.h"
 #include "protocols/hitag.h"
 #include "timeslot.h"
+#include "nrf_gpio.h"
 
 #define NRF_LOG_MODULE_NAME hitag2_reader
 #include "nrf_log.h"
@@ -144,9 +145,60 @@ static void hitag2_send_start_auth(void) {
     NRF_LOG_INFO("START_AUTH transmission complete - sent %d bits", HITAG2_START_AUTH_BITS);
 }
 
+// Static buffer for GPIO polling results
+static uint16_t g_polled_edges[128];
+static int g_polled_edge_count = 0;
+
+/**
+ * Poll GPIO directly to capture card response edges
+ * This bypasses GPIOTE which is disabled during timeslot
+ * 
+ * @param buffer Buffer to store edge intervals
+ * @param max_edges Maximum number of edges to capture
+ * @param timeout_us How long to poll (microseconds)
+ * @return Number of edges captured
+ */
+static int hitag2_poll_gpio_response(uint16_t *buffer, int max_edges, uint32_t timeout_us) {
+    uint32_t pin = LF_OA_OUT;
+    uint32_t last_state = nrf_gpio_pin_read(pin);
+    uint32_t start_time = bsp_get_sys_tick_us();
+    uint32_t last_edge_time = start_time;
+    int edge_count = 0;
+    
+    NRF_LOG_INFO("Polling GPIO for response (timeout: %d µs)...", timeout_us);
+    
+    // Poll GPIO pin directly until timeout or buffer full
+    while ((bsp_get_sys_tick_us() - start_time) < timeout_us && edge_count < max_edges) {
+        uint32_t current_state = nrf_gpio_pin_read(pin);
+        
+        // Edge detected (state change)
+        if (current_state != last_state) {
+            uint32_t now = bsp_get_sys_tick_us();
+            uint32_t interval = now - last_edge_time;
+            
+            // Cap interval at 0xFF like circular buffer does
+            buffer[edge_count++] = (interval > 0xFF) ? 0xFF : (uint16_t)interval;
+            
+            // Log first few edges for debugging
+            if (edge_count <= 10) {
+                NRF_LOG_DEBUG("Polled edge #%d: interval=%d µs", edge_count - 1, buffer[edge_count - 1]);
+            }
+            
+            last_edge_time = now;
+            last_state = current_state;
+        }
+    }
+    
+    NRF_LOG_INFO("GPIO polling complete: captured %d edges", edge_count);
+    return edge_count;
+}
+
 /**
  * Timeslot callback for time-critical BPLM transmission
  * This is called within a radio timeslot with interrupts disabled
+ * 
+ * CRITICAL: GPIOTE interrupts are DISABLED during timeslot!
+ * We must poll GPIO directly to capture card response.
  * 
  * Following T55xx pattern: Start field INSIDE timeslot for proper control
  */
@@ -166,6 +218,11 @@ static void hitag2_timeslot_callback(void) {
     
     // Field is now ON after transmission
     // Tag can respond with UID
+    
+    // CRITICAL: Poll GPIO immediately to capture response
+    // GPIOTE is disabled during timeslot, so we must use direct pin reading
+    // Card responds within ~1-2ms after START_AUTH completes
+    g_polled_edge_count = hitag2_poll_gpio_response(g_polled_edges, 128, 10000);
 }
 
 /**
@@ -203,41 +260,34 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     
     NRF_LOG_INFO("Requesting timeslot for precise BPLM transmission...");
     
-    // Request timeslot for time-critical transmission
+    // Clear polled edges buffer
+    g_polled_edge_count = 0;
+    
+    // Request timeslot for time-critical transmission AND reception
     // Following T55xx pattern: Field is started INSIDE timeslot
     // This ensures precise timing without BLE interference
-    // Duration: 10ms (powerup + auth window + transmission + response + margin)
-    request_timeslot(10000, hitag2_timeslot_callback);
+    // Duration: 15ms (powerup + auth + transmission + GPIO polling + margin)
+    // CRITICAL: GPIO polling happens INSIDE timeslot callback to capture response
+    request_timeslot(15000, hitag2_timeslot_callback);
     
     NRF_LOG_INFO("START_AUTH transmitted with correct BPLM");
+    NRF_LOG_INFO("GPIO polling captured %d edges", g_polled_edge_count);
     
-    // Field is now ON after timeslot
-    // Wait for tag response (EXTENDED for weak/slow tags)
-    bsp_delay_us(HITAG_T_WAIT_RESPONSE_US);
-    
-    NRF_LOG_INFO("Listening for tag response...");
-    NRF_LOG_INFO("Circular buffer size: %d", cb.count);
-    
-    // Step 5: Try to decode response (32-bit UID, Manchester encoded)
+    // Process polled edges through Manchester decoder
     bool ok = false;
-    autotimer *p_at = bsp_obtain_timer(0);
     
-    // EXTENDED timeout for weak signals
-    uint32_t extended_timeout = timeout_ms * 2;  // Double timeout
-    uint32_t processed_count = 0;
-    
-    // Process received edge timings
-    while (!ok && NO_TIMEOUT_1MS(p_at, extended_timeout)) {
-        uint16_t val = 0;
-        while (!ok && NO_TIMEOUT_1MS(p_at, extended_timeout) && cb_pop_front(&cb, &val)) {
-            processed_count++;
-            
+    if (g_polled_edge_count == 0) {
+        NRF_LOG_WARNING("No edges captured! Card may not be responding.");
+    } else {
+        NRF_LOG_INFO("Processing %d polled edges...", g_polled_edge_count);
+        
+        for (int i = 0; i < g_polled_edge_count; i++) {
             // Log first few intervals for debugging
-            if (processed_count <= 10) {
-                NRF_LOG_INFO("Processing edge #%d: interval=%d", processed_count, val);
+            if (i < 10) {
+                NRF_LOG_INFO("Processing polled edge #%d: interval=%d", i, g_polled_edges[i]);
             }
             
-            if (hitag2.decoder.feed(codec, val)) {
+            if (hitag2.decoder.feed(codec, g_polled_edges[i])) {
                 // Successfully decoded response
                 memcpy(data, hitag2.get_data(codec), hitag2.data_size);
                 ok = true;
@@ -248,10 +298,6 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         }
     }
     
-    bsp_return_timer(p_at);
-    
-    NRF_LOG_INFO("Processed %d edge intervals from circular buffer", processed_count);
-    
     // Clean up
     stop_lf_125khz_radio();
     uninit_hitag2_hw();
@@ -261,12 +307,13 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     if (!ok) {
         NRF_LOG_INFO("Hitag2 tag not found or no response");
         NRF_LOG_INFO("Transmitter confirmed working (scope shows tag responding)");
-        NRF_LOG_INFO("Processed %d edges but failed to decode valid UID", processed_count);
-        if (processed_count == 0) {
-            NRF_LOG_WARNING("No edges captured! Check GPIO interrupt setup");
+        NRF_LOG_INFO("Processed %d polled edges but failed to decode valid UID", g_polled_edge_count);
+        if (g_polled_edge_count == 0) {
+            NRF_LOG_WARNING("No edges captured via GPIO polling!");
+            NRF_LOG_WARNING("Check: Tag positioning, field strength, timing");
         } else {
-            NRF_LOG_INFO("Edges captured but decode failed - signal may be too weak/noisy");
-            NRF_LOG_INFO("Try: Closer positioning, better antenna coupling");
+            NRF_LOG_INFO("Edges captured but decode failed - check Manchester thresholds");
+            NRF_LOG_INFO("Try: Different tag, closer positioning, check timing");
         }
     }
     
