@@ -148,9 +148,20 @@ static void hitag2_send_start_auth(void) {
  */
 static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                                            uint16_t *intervals, int max_intervals) {
-    // Threshold: 600mV = (600/3300) * 4095 = 745 ADC units
-    // User measurements: LOW=434mV(~538), HIGH=740mV(~920)
-    const uint16_t threshold = 745;
+    // Find min/max to calculate adaptive threshold
+    uint16_t min_sample = 4095, max_sample = 0;
+    for (int i = 0; i < sample_count; i++) {
+        if (samples[i] < min_sample) min_sample = samples[i];
+        if (samples[i] > max_sample) max_sample = samples[i];
+    }
+    
+    // Use midpoint as threshold
+    uint16_t threshold = (min_sample + max_sample) / 2;
+    
+    NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV), threshold=%d (~%dmV)",
+                 min_sample, (min_sample * 3300) / 4095,
+                 max_sample, (max_sample * 3300) / 4095,
+                 threshold, (threshold * 3300) / 4095);
     
     int16_t last_sample = -1;
     int last_edge_index = 0;
@@ -175,8 +186,10 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                 intervals[interval_count++] = (interval > 0xFF) ? 0xFF : (uint16_t)interval;
                 last_edge_index = i;
                 
-                NRF_LOG_DEBUG("Edge %d at sample %d, interval=%d", 
-                             interval_count, i, interval);
+                if (interval_count <= 10) {
+                    NRF_LOG_INFO("Edge %d at sample %d, interval=%d", 
+                                 interval_count, i, interval);
+                }
             }
         }
         last_sample = samples[i];
@@ -248,8 +261,8 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     
     NRF_LOG_INFO("START_AUTH transmitted, collecting SAADC samples...");
     
-    // Wait briefly for samples to accumulate
-    bsp_delay_ms(20);
+    // Wait longer for samples to accumulate (increased from 20ms)
+    bsp_delay_ms(50);
     
     // Collect all SAADC samples from circular buffer
     uint16_t samples[256];
@@ -262,11 +275,24 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         if (sample_count <= 20) {
             // Convert to millivolts: (sample / 4095) * 3300
             uint32_t mv = (val * 3300) / 4095;
-            NRF_LOG_DEBUG("Sample[%d]: %d (~%dmV)", sample_count-1, val, mv);
+            NRF_LOG_INFO("Sample[%d]: %d (~%dmV)", sample_count-1, val, mv);
         }
     }
     
-    NRF_LOG_INFO("Collected %d SAADC samples, detecting edges...", sample_count);
+    NRF_LOG_INFO("Collected %d SAADC samples", sample_count);
+    
+    // Check if we got any samples at all
+    if (sample_count == 0) {
+        NRF_LOG_ERROR("No SAADC samples collected - SAADC may not be running!");
+        NRF_LOG_ERROR("Check that lf_125khz_radio_saadc_enable() was called");
+        stop_lf_125khz_radio();
+        uninit_hitag2_hw();
+        cb_free(&cb);
+        hitag2.free(codec);
+        return false;
+    }
+    
+    NRF_LOG_INFO("Detecting edges from %d samples...", sample_count);
     
     // Detect edges and get intervals
     uint16_t intervals[128];
