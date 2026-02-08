@@ -37,9 +37,11 @@ NRF_LOG_MODULE_REGISTER();
 #define HITAG_PWM_POLARITY_BIT (1 << 15)  // MSB for polarity
 
 // Period detection thresholds for Manchester demodulation at RF/50
-#define HITAG_T_LOW 0x40
-#define HITAG_T_HIGH 0x60
-#define HITAG_T_JITTER 0x10
+// RELAXED: Lower thresholds for weak tag responses
+// User reports tag responding but receiver not detecting - need more tolerance
+#define HITAG_T_LOW 0x30      // Was 0x40 - lowered for weak signals
+#define HITAG_T_HIGH 0x70     // Was 0x60 - increased range  
+#define HITAG_T_JITTER 0x20   // Was 0x10 - doubled tolerance
 
 // PWM sequence storage for Hitag2
 static nrf_pwm_values_wave_form_t m_hitag2_pwm_seq_vals[HITAG_RAW_SIZE] = {};
@@ -108,14 +110,19 @@ bool hitag2_decode_biplm_bit(hitag_codec *d, uint8_t half_bit) {
 uint8_t hitag2_period(uint8_t interval) {
     // Simplified period detection for Hitag2
     // T0 = 8us, RF/50 means 50 RF cycles per bit
-    // This needs to be tuned based on actual hardware timing
+    // RELAXED thresholds to capture weak tag responses
+    
+    NRF_LOG_DEBUG("Period detect: interval=%d (0x%02X)", interval, interval);
     
     if (interval >= (HITAG_T_LOW - HITAG_T_JITTER) && interval <= (HITAG_T_LOW + HITAG_T_JITTER)) {
+        NRF_LOG_DEBUG("  -> T_LOW (period 0)");
         return 0;
     }
     if (interval >= (HITAG_T_HIGH - HITAG_T_JITTER) && interval <= (HITAG_T_HIGH + HITAG_T_JITTER)) {
+        NRF_LOG_DEBUG("  -> T_HIGH (period 1)");
         return 1;
     }
+    NRF_LOG_DEBUG("  -> INVALID (period 3)");
     return 3;  // Invalid period
 }
 
@@ -153,6 +160,12 @@ bool hitag2_decode_feed(hitag_codec *d, bool bit) {
         d->raw |= 0x01;
     }
     
+    // Log bit accumulation progress
+    if (d->raw_length % 4 == 0) {
+        NRF_LOG_DEBUG("Progress: %d bits, last nibble=0x%X", 
+                     d->raw_length, (uint8_t)(d->raw & 0x0F));
+    }
+    
     if (d->raw_length < 32) {  // Wait for at least UID bits
         return false;
     }
@@ -163,37 +176,36 @@ bool hitag2_decode_feed(hitag_codec *d, bool bit) {
         d->data[i] = (d->raw >> ((HITAG_UID_SIZE - 1 - i) * 8)) & 0xFF;
     }
     
+    NRF_LOG_INFO("Decoded 32-bit UID from raw: 0x%08X", (uint32_t)d->raw);
+    
     return d->raw_length >= 32;
 }
 
 bool hitag2_decoder_feed(hitag_codec *d, uint16_t interval) {
-    // Decode BPLM-encoded data from reader (downstream)
-    // Reader sends commands in BPLM (Bi-Phase Mark) encoding
-    // Reference: https://github.com/RfidResearchGroup/proxmark3/blob/master/armsrc/hitag2.c
-    // This is a simplified decoder - production code would need
-    // proper edge detection and timing analysis per Proxmark3 implementation
+    // Decode Manchester-encoded tag response (upstream)
+    // Tag responds in Manchester encoding after START_AUTH
     
-    // For now, use simplified decoding logic
-    // Real implementation needs BPLM demodulation with edge timing
+    NRF_LOG_DEBUG("Decoder feed: interval=%d (0x%04X)", interval, interval);
+    
     bool bits[2] = {0};
     int8_t bitlen = 0;
     
-    // TODO: Implement proper BPLM decoder for downstream
-    // For now, fall back to basic bit extraction
-    // Production code should count transitions per bit period:
-    // - 2 transitions (start + middle) = logic 1
-    // - 1 transition (start only) = logic 0
+    // Feed interval to Manchester decoder
     manchester_feed(d->modem, (uint8_t)interval, bits, &bitlen);
     
     if (bitlen == -1) {
+        NRF_LOG_DEBUG("  -> Manchester decode failed, resetting");
         d->raw = 0;
         d->raw_length = 0;
         d->biphase_state = 0;
         return false;
     }
     
+    NRF_LOG_DEBUG("  -> Decoded %d bit(s): %d %d", bitlen, bits[0], bitlen > 1 ? bits[1] : -1);
+    
     for (int i = 0; i < bitlen; i++) {
         if (hitag2_decode_feed(d, bits[i])) {
+            NRF_LOG_INFO("COMPLETE! Got %d bits total", d->raw_length);
             return true;
         }
     }

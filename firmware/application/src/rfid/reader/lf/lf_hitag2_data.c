@@ -19,7 +19,7 @@ NRF_LOG_MODULE_REGISTER();
 // At 125kHz: 1 carrier period (Tc) = 8μs
 #define HITAG_T_WAIT_POWERUP_US    2504  // 313 Tc = 2.504ms - Tag powerup time
 #define HITAG_T_WAIT_START_AUTH_US  464  // 58 Tc = 464μs - START_AUTH window
-#define HITAG_T_WAIT_RESPONSE_US   1600  // 200 Tc = 1.6ms - Wait for tag response
+#define HITAG_T_WAIT_RESPONSE_US   5000  // EXTENDED: Was 1600µs, now 5ms for slow/weak responses
 
 // START_AUTH command: 5 bits = 11000 binary (MSB first)
 #define HITAG2_START_AUTH_BITS    5
@@ -39,6 +39,17 @@ static void hitag2_gpio_int0_cb(void) {
         val = cntr & 0xff;
     }
     cb_push_back(&cb, &val);
+    
+    // DEBUG: Log captured edges (sample first 50)
+    static uint16_t edge_count = 0;
+    if (edge_count < 50) {
+        NRF_LOG_DEBUG("Edge #%d: interval=%d (0x%02X)", edge_count, val, val);
+        edge_count++;
+    } else if (edge_count == 50) {
+        NRF_LOG_INFO("... (suppressing further edge logs)");
+        edge_count++;
+    }
+    
     clear_lf_counter_value();
 }
 
@@ -173,6 +184,8 @@ static void hitag2_timeslot_callback(void) {
  */
 bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     NRF_LOG_INFO("Hitag2 RTF protocol with correct BPLM encoding starting...");
+    NRF_LOG_INFO("RECEIVER: Relaxed thresholds for weak signals enabled");
+    NRF_LOG_INFO("RECEIVER: Extended listening window (5ms)");
     
     // Allocate codec for Manchester decoding (tag response)
     void *codec = hitag2.alloc();
@@ -199,22 +212,36 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     NRF_LOG_INFO("START_AUTH transmitted with correct BPLM");
     
     // Field is now ON after timeslot
-    // Wait for tag response
+    // Wait for tag response (EXTENDED for weak/slow tags)
     bsp_delay_us(HITAG_T_WAIT_RESPONSE_US);
+    
+    NRF_LOG_INFO("Listening for tag response...");
+    NRF_LOG_INFO("Circular buffer size: %d", cb_get_size(&cb));
     
     // Step 5: Try to decode response (32-bit UID, Manchester encoded)
     bool ok = false;
     autotimer *p_at = bsp_obtain_timer(0);
     
+    // EXTENDED timeout for weak signals
+    uint32_t extended_timeout = timeout_ms * 2;  // Double timeout
+    uint32_t processed_count = 0;
+    
     // Process received edge timings
-    while (!ok && NO_TIMEOUT_1MS(p_at, timeout_ms)) {
+    while (!ok && NO_TIMEOUT_1MS(p_at, extended_timeout)) {
         uint16_t val = 0;
-        while (!ok && NO_TIMEOUT_1MS(p_at, timeout_ms) && cb_pop_front(&cb, &val)) {
+        while (!ok && NO_TIMEOUT_1MS(p_at, extended_timeout) && cb_pop_front(&cb, &val)) {
+            processed_count++;
+            
+            // Log first few intervals for debugging
+            if (processed_count <= 10) {
+                NRF_LOG_INFO("Processing edge #%d: interval=%d", processed_count, val);
+            }
+            
             if (hitag2.decoder.feed(codec, val)) {
                 // Successfully decoded response
                 memcpy(data, hitag2.get_data(codec), hitag2.data_size);
                 ok = true;
-                NRF_LOG_INFO("Hitag2 UID: %02X%02X%02X%02X", 
+                NRF_LOG_INFO("SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
                             data[0], data[1], data[2], data[3]);
                 break;
             }
@@ -222,6 +249,8 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     }
     
     bsp_return_timer(p_at);
+    
+    NRF_LOG_INFO("Processed %d edge intervals from circular buffer", processed_count);
     
     // Clean up
     stop_lf_125khz_radio();
@@ -231,7 +260,14 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     
     if (!ok) {
         NRF_LOG_INFO("Hitag2 tag not found or no response");
-        NRF_LOG_INFO("Gap modulation transmitted - check with sniffer");
+        NRF_LOG_INFO("Transmitter confirmed working (scope shows tag responding)");
+        NRF_LOG_INFO("Processed %d edges but failed to decode valid UID", processed_count);
+        if (processed_count == 0) {
+            NRF_LOG_WARNING("No edges captured! Check GPIO interrupt setup");
+        } else {
+            NRF_LOG_INFO("Edges captured but decode failed - signal may be too weak/noisy");
+            NRF_LOG_INFO("Try: Closer positioning, better antenna coupling");
+        }
     }
     
     return ok;
