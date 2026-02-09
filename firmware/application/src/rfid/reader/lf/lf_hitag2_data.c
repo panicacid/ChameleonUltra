@@ -159,13 +159,19 @@ static void hitag2_send_start_auth(void) {
  */
 static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                                            uint16_t *intervals, int max_intervals) {
-    // FILTERED MIN/MAX with SQUELCH to prevent ghost tags
-    // High-pass filter: ignore samples < 4000 ADC (filters 1100 noise floor)
-    // Real signal LOW is ~5800, noise floor is ~1100
+    // STEADY-STATE ANALYSIS: Skip startup period to eliminate transients
+    // Skip first 25% of buffer (~2000 samples) to allow field stabilization
+    // This eliminates 4004 ADC startup glitches that poison threshold calculation
+    int start_idx = sample_count / 4;
+    
+    NRF_LOG_INFO("Using STEADY-STATE region: samples %d-%d (last 75%% of buffer)",
+                 start_idx, sample_count);
+    
+    // Calculate min/max on STABLE REGION only (no voltage filter needed)
     uint16_t min_sample = 4095, max_sample = 0;
-    for (int i = 0; i < sample_count; i++) {
-        // Filter out noise floor and transients - only consider samples > 4000
-        if (samples[i] > 4000 && samples[i] < min_sample) {
+    for (int i = start_idx; i < sample_count; i++) {
+        // No voltage filter - time-based filtering handles startup
+        if (samples[i] < min_sample) {
             min_sample = samples[i];
         }
         if (samples[i] > max_sample) {
@@ -174,24 +180,23 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     }
     
     // SQUELCH: Check signal strength to kill ghost tags
-    // Noise swings ~2000 ADC, real tags swing ~8000 ADC
+    // Lower threshold (1000) for weak/shallow modulation tags
     uint16_t swing = max_sample - min_sample;
-    if (swing < 3000) {
+    if (swing < 1000) {
         NRF_LOG_INFO("SQUELCH: Signal too weak (swing=%d ADC) - no tag present", swing);
         return 0;  // No edges - ghost tag killed
     }
     
-    // Calculate TOP-BIASED threshold to catch shallow modulation
-    // For shallow modulation (e.g., 11600-14360), midpoint fails
-    // Top-biased: (max*3 + min)/4 places threshold in the dip
-    // Example: (14360*3 + 4008)/4 = 11772 (catches 11600 dip!)
-    uint16_t threshold = ((uint32_t)max_sample * 3 + min_sample) / 4;
+    // Calculate STANDARD MIDPOINT threshold
+    // With steady-state filtering, min is real signal LOW (e.g., 11800)
+    // Midpoint is mathematically correct: (11800 + 14000) / 2 = 12900
+    uint16_t threshold = (min_sample + max_sample) / 2;
     
     NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV), swing=%d ADC",
                  min_sample, (min_sample * 3300) / 4095,
                  max_sample, (max_sample * 3300) / 4095,
                  swing);
-    NRF_LOG_INFO("TOP-BIASED threshold: %d ADC (~%dmV) - 75%% toward carrier for shallow modulation",
+    NRF_LOG_INFO("STEADY-STATE threshold: %d ADC (~%dmV) - midpoint of stable signal",
                  threshold, (threshold * 3300) / 4095);
     
     int16_t last_sample = -1;
