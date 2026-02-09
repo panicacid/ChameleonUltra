@@ -206,10 +206,10 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                 uint16_t interval_us = sample_interval * MICROSECONDS_PER_SAMPLE;
                 
                 // FIXED: Remove 255µs cap - use full uint16_t range
-                // FIXED: Filter noise - skip intervals <40µs (glitches)
+                // FIXED: Filter noise - skip intervals <10µs (high sensitivity mode)
                 // FIXED: Skip field stabilization - first edge if >1000µs
-                if (interval_us < 40) {
-                    // Skip noise/glitches
+                if (interval_us < 10) {
+                    // Skip only severe glitches - capture all real edges including jittery ones
                     last_edge_index = i;
                 } else if (interval_count == 0 && interval_us > 1000) {
                     // Skip field stabilization (first long edge)
@@ -384,35 +384,28 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         NRF_LOG_INFO("Feeding all %d intervals to decoder", edge_count);
     }
     
-    // Feed intervals to Manchester decoder with phase retry
-    // Try Phase A (from SOF), then Phase B (from SOF+1) if needed
+    // Feed intervals to Manchester decoder with sliding window retry
+    // Try offsets 0, 1, 2, 3 from SOF to handle extra noise edges
     bool ok = false;
     
-    // Phase A: Try from SOF position
-    NRF_LOG_INFO("Phase A: Attempting decode from index %d", decode_start);
-    hitag2.decoder.start(codec, 0);  // Reset decoder state
-    for (int i = decode_start; i < edge_count; i++) {
-        if (hitag2.decoder.feed(codec, intervals[i])) {
-            memcpy(data, hitag2.get_data(codec), hitag2.data_size);
-            ok = true;
-            NRF_LOG_INFO("Phase A SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
-                        data[0], data[1], data[2], data[3]);
-            break;
-        }
-    }
-    
-    // Phase B: If Phase A failed, try from SOF+1 (180° phase shift)
-    if (!ok && decode_start + 1 < edge_count) {
-        NRF_LOG_INFO("Phase A failed, trying Phase B from index %d (180° phase shift)", decode_start + 1);
+    // Sliding window: Try 4 different starting positions
+    for (int offset = 0; offset < 4 && !ok && decode_start + offset < edge_count; offset++) {
+        int start_pos = decode_start + offset;
+        NRF_LOG_INFO("Trying offset %d: decode from index %d", offset, start_pos);
+        
         hitag2.decoder.start(codec, 0);  // Reset decoder state
-        for (int i = decode_start + 1; i < edge_count; i++) {
+        for (int i = start_pos; i < edge_count; i++) {
             if (hitag2.decoder.feed(codec, intervals[i])) {
                 memcpy(data, hitag2.get_data(codec), hitag2.data_size);
                 ok = true;
-                NRF_LOG_INFO("Phase B SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
-                            data[0], data[1], data[2], data[3]);
+                NRF_LOG_INFO("Offset %d SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
+                            offset, data[0], data[1], data[2], data[3]);
                 break;
             }
+        }
+        
+        if (!ok && offset < 3) {
+            NRF_LOG_INFO("Offset %d failed, trying next offset...", offset);
         }
     }
     
