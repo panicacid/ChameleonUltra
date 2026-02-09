@@ -268,22 +268,30 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     
     NRF_LOG_INFO("START_AUTH transmitted, collecting SAADC samples...");
     
-    // Wait longer for samples to accumulate (increased from 20ms)
-    bsp_delay_ms(50);
-    
-    // Collect all SAADC samples from circular buffer
-    uint16_t samples[256];
+    // Use larger static array to hold full response (8192 samples = 65ms at 125kHz)
+    // Static to avoid stack overflow (16KB is too large for stack)
+    static uint16_t samples[8192];
     int sample_count = 0;
-    uint16_t val = 0;
-    while (cb_pop_front(&cb, &val) && sample_count < 256) {
-        samples[sample_count++] = val;
-        
-        // Log first 20 samples for debugging
-        if (sample_count <= 20) {
-            // Convert to millivolts: (sample / 4095) * 3300
-            uint32_t mv = (val * 3300) / 4095;
-            NRF_LOG_INFO("Sample[%d]: %d (~%dmV)", sample_count-1, val, mv);
+    
+    // Continuous drain loop: don't sleep, actively drain buffer for 50ms
+    // This prevents circular buffer overflow and captures complete tag response
+    autotimer_enable(50000);  // 50ms timeout
+    
+    while (!autotimer_is_timeout() && sample_count < 8192) {
+        uint16_t val;
+        // Drain all available samples from circular buffer
+        while (cb_pop_front(&cb, &val) && sample_count < 8192) {
+            samples[sample_count++] = val;
+            
+            // Log first 20 samples for debugging
+            if (sample_count <= 20) {
+                // Convert to millivolts: (sample / 4095) * 3300
+                uint32_t mv = (val * 3300) / 4095;
+                NRF_LOG_INFO("Sample[%d]: %d (~%dmV)", sample_count-1, val, mv);
+            }
         }
+        // Brief yield to allow SAADC interrupt to fire
+        bsp_delay_us(100);
     }
     
     NRF_LOG_INFO("Collected %d SAADC samples", sample_count);
