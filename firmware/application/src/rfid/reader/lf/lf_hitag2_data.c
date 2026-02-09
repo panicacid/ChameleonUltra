@@ -339,49 +339,18 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         return false;
     }
     
-    // Hitag2 tag response format:
-    // SOF (Start of Frame): 5 consecutive '1' bits = 11111 pattern
-    // Then: Manchester encoded data (UID: 32 bits)
-    //
-    // The SOF appears as a series of short intervals
-    // Short pulse in Hitag2 ~125µs, decoder T_LOW = 48µs (0x30)
-    // With jitter: 16-80µs is T_LOW range
-    
-    // Look for SOF: sequence of ~5 short intervals indicating 11111
-    int sof_start = -1;
-    int consecutive_short = 0;
-    
-    // SOF detection thresholds in MICROSECONDS (now that intervals are in µs)
-    // Hitag2 short pulse ~125µs, with jitter allow 80-170µs range
-    const uint16_t SOF_SHORT_MIN = 80;   // Minimum µs for short interval
-    const uint16_t SOF_SHORT_MAX = 170;  // Maximum µs for short interval
-    
-    for (int i = 0; i < edge_count; i++) {
-        // Check if interval is "short" (in microseconds now!)
-        if (intervals[i] >= SOF_SHORT_MIN && intervals[i] <= SOF_SHORT_MAX) {
-            consecutive_short++;
-            if (consecutive_short >= 5) {  // Found SOF (5 or more short intervals)
-                sof_start = i - 4;  // Start of SOF sequence
-                NRF_LOG_INFO("SOF detected at edge %d (5+ short intervals %d-%dµs)", 
-                            sof_start, SOF_SHORT_MIN, SOF_SHORT_MAX);
-                break;
-            }
-        } else {
-            consecutive_short = 0;  // Reset on non-short interval
-        }
+    // DEBUG: Log first 32 intervals in microseconds for analysis
+    NRF_LOG_INFO("First 32 intervals (µs):");
+    for (int i = 0; i < edge_count && i < 32; i++) {
+        NRF_LOG_INFO("INT[%d]: %dµs", i, intervals[i]);
     }
     
-    // Start decoding after SOF
-    int decode_start = (sof_start >= 0) ? (sof_start + 5) : 0;
-    if (sof_start >= 0) {
-        NRF_LOG_INFO("Starting Manchester decode after SOF at edge %d", decode_start);
-    } else {
-        NRF_LOG_WARNING("SOF not detected, starting decode from beginning");
-    }
+    // Feed ALL intervals to Manchester decoder (SOF skip disabled for Paxton debugging)
+    // The decoder should handle SOF internally, or we'll see F8... pattern if present
+    NRF_LOG_INFO("Feeding all %d intervals to decoder (SOF skip disabled)", edge_count);
     
-    // Feed intervals to Manchester decoder starting after SOF
     bool ok = false;
-    for (int i = decode_start; i < edge_count; i++) {
+    for (int i = 0; i < edge_count; i++) {
         if (hitag2.decoder.feed(codec, intervals[i])) {
             memcpy(data, hitag2.get_data(codec), hitag2.data_size);
             ok = true;
