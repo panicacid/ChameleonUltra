@@ -159,22 +159,23 @@ static void hitag2_send_start_auth(void) {
  */
 static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                                            uint16_t *intervals, int max_intervals) {
-    // Find min/max for diagnostic purposes
+    // Find min/max for DYNAMIC thresholding
     uint16_t min_sample = 4095, max_sample = 0;
     for (int i = 0; i < sample_count; i++) {
         if (samples[i] < min_sample) min_sample = samples[i];
         if (samples[i] > max_sample) max_sample = samples[i];
     }
     
-    // Use calibrated threshold based on scope measurements
-    // Scope showed weak data peaks at 2.25V that need reliable detection
-    // Calibrated to 1.125V (midpoint between 0V floor and 2.25V weak peaks)
-    uint16_t threshold = HITAG2_ADC_THRESHOLD_CALIBRATED;  // 1395 ADC = 1.125V
+    // DYNAMIC THRESHOLD: Calculate from actual signal
+    // This automatically adapts to varying signal levels:
+    // - Paxton tags: HIGH ~13900, LOW ~5850 → threshold ~9875
+    // - Other tags: Different levels → automatically centered
+    uint16_t threshold = (min_sample + max_sample) / 2;
     
     NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV)",
                  min_sample, (min_sample * 3300) / 4095,
                  max_sample, (max_sample * 3300) / 4095);
-    NRF_LOG_INFO("Using CALIBRATED threshold: %d ADC (~%dmV) for 2.25V weak peak detection",
+    NRF_LOG_INFO("DYNAMIC threshold: %d ADC (~%dmV) - midpoint between min/max",
                  threshold, (threshold * 3300) / 4095);
     
     int16_t last_sample = -1;
