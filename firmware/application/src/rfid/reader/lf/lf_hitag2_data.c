@@ -204,13 +204,24 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                 const uint8_t MICROSECONDS_PER_SAMPLE = 8;
                 uint16_t interval_us = sample_interval * MICROSECONDS_PER_SAMPLE;
                 
-                // Store in microseconds (cap at 255 for uint8_t decoder)
-                intervals[interval_count++] = (interval_us > 0xFF) ? 0xFF : (uint16_t)interval_us;
-                last_edge_index = i;
-                
-                if (interval_count <= 10) {
-                    NRF_LOG_INFO("Edge %d: %d samples = %dµs", 
-                                 interval_count, sample_interval, interval_us);
+                // FIXED: Remove 255µs cap - use full uint16_t range
+                // FIXED: Filter noise - skip intervals <40µs (glitches)
+                // FIXED: Skip field stabilization - first edge if >1000µs
+                if (interval_us < 40) {
+                    // Skip noise/glitches
+                    last_edge_index = i;
+                } else if (interval_count == 0 && interval_us > 1000) {
+                    // Skip field stabilization (first long edge)
+                    last_edge_index = i;
+                } else {
+                    // Store full interval value (no cap)
+                    intervals[interval_count++] = interval_us;
+                    last_edge_index = i;
+                    
+                    if (interval_count <= 10) {
+                        NRF_LOG_INFO("Edge %d: %d samples = %dµs", 
+                                     interval_count, sample_interval, interval_us);
+                    }
                 }
             }
         }
