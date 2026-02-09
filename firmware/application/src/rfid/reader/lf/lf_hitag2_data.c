@@ -426,6 +426,19 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         NRF_LOG_INFO("Feeding all %d intervals to decoder", edge_count);
     }
     
+    // Clock Normalization (Suut Sync): Calculate scale factor from SOF
+    // Measures average SOF interval and scales all intervals to 125µs standard
+    float scale = 1.0f;  // Default: no scaling
+    if (sof_start >= 0 && sof_start + 5 <= edge_count) {
+        uint32_t sof_sum = 0;
+        for (int k = 0; k < 5; k++) {
+            sof_sum += intervals[sof_start + k];
+        }
+        float avg_sof = (float)sof_sum / 5.0f;
+        scale = 125.0f / avg_sof;  // Target 125µs standard timing
+        NRF_LOG_INFO("Clock Normalization: SOF_avg=%.1fµs, Scale=%.3f", avg_sof, scale);
+    }
+    
     // Feed intervals to Manchester decoder with sliding window retry
     // Try offsets 0, 1, 2, 3 from SOF to handle extra noise edges
     bool ok = false;
@@ -437,7 +450,11 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         
         hitag2.decoder.start(codec, 0);  // Reset decoder state
         for (int i = start_pos; i < edge_count; i++) {
-            if (hitag2.decoder.feed(codec, intervals[i])) {
+            uint16_t raw_interval = intervals[i];
+            // Apply clock normalization to compensate for timing jitter
+            uint16_t normalized_interval = (uint16_t)((float)raw_interval * scale);
+            
+            if (hitag2.decoder.feed(codec, normalized_interval)) {
                 memcpy(data, hitag2.get_data(codec), hitag2.data_size);
                 ok = true;
                 NRF_LOG_INFO("Offset %d SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
