@@ -220,19 +220,33 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     NRF_LOG_INFO("POST-TX AVERAGE threshold: %d ADC (~%dmV) - outlier-resistant (N=%d)",
                  threshold, (threshold * 3300) / 4095, valid_samples);
     
-    int16_t last_sample = -1;
+    // DERIVATIVE-BASED EDGE DETECTION (Smoothing + Slope Analysis)
+    // More robust to amplitude variations and noise than threshold crossing
+    NRF_LOG_INFO("Using derivative edge detection with 3-point smoothing");
+    
     int last_edge_index = 0;
     int interval_count = 0;
+    int16_t last_smoothed = -1;
     
-    for (int i = 0; i < sample_count && interval_count < max_intervals; i++) {
-        if (last_sample >= 0) {
-            // Detect threshold crossing (edge)
+    // Derivative threshold - detects significant slope changes
+    // Experimentally tuned for Hitag2 signal characteristics
+    const int16_t DERIVATIVE_THRESHOLD = 500;  // ADC units per sample
+    
+    for (int i = 1; i < sample_count - 1 && interval_count < max_intervals; i++) {
+        // 3-point moving average smoothing to reduce noise
+        int16_t smoothed = (samples[i-1] + samples[i] + samples[i+1]) / 3;
+        
+        if (last_smoothed >= 0) {
+            // Calculate derivative (slope between samples)
+            int16_t derivative = smoothed - last_smoothed;
+            
+            // Detect edges via significant slope changes
             bool edge_detected = false;
-            if (last_sample < threshold && samples[i] >= threshold) {
-                // Rising edge (LOW → HIGH)
+            if (derivative > DERIVATIVE_THRESHOLD) {
+                // Rising edge (strong positive slope)
                 edge_detected = true;
-            } else if (last_sample >= threshold && samples[i] < threshold) {
-                // Falling edge (HIGH → LOW)
+            } else if (derivative < -DERIVATIVE_THRESHOLD) {
+                // Falling edge (strong negative slope)
                 edge_detected = true;
             }
             
@@ -240,35 +254,30 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                 // Calculate interval in sample units
                 int sample_interval = i - last_edge_index;
                 
-                // CRITICAL: Convert to microseconds for decoder
-                // SAADC runs at 125kHz (PWM 500kHz/4) = 8µs per sample
-                // Decoder expects µs: T_LOW=48µs (0x30), T_HIGH=112µs (0x70)
-                // Hitag2 short pulse ~125µs = ~15-16 samples = 120-128µs
+                // Convert to microseconds (SAADC at 125kHz = 8µs per sample)
                 const uint8_t MICROSECONDS_PER_SAMPLE = 8;
                 uint16_t interval_us = sample_interval * MICROSECONDS_PER_SAMPLE;
                 
-                // FIXED: Remove 255µs cap - use full uint16_t range
-                // FIXED: Filter noise - skip intervals <20µs (balanced sensitivity)
-                // FIXED: Skip field stabilization - first edge if >1000µs
+                // Filter noise and field stabilization
                 if (interval_us < 20) {
-                    // Skip glitches - safe middle ground between sensitivity and noise rejection
+                    // Skip very short glitches
                     last_edge_index = i;
                 } else if (interval_count == 0 && interval_us > 1000) {
                     // Skip field stabilization (first long edge)
                     last_edge_index = i;
                 } else {
-                    // Store full interval value (no cap)
+                    // Store valid interval
                     intervals[interval_count++] = interval_us;
                     last_edge_index = i;
                     
                     if (interval_count <= 10) {
-                        NRF_LOG_INFO("Edge %d: %d samples = %dµs", 
-                                     interval_count, sample_interval, interval_us);
+                        NRF_LOG_INFO("Edge %d: %d samples = %dµs (derivative=%d)", 
+                                     interval_count, sample_interval, interval_us, derivative);
                     }
                 }
             }
         }
-        last_sample = samples[i];
+        last_smoothed = smoothed;
     }
     
     NRF_LOG_INFO("Detected %d edges from %d samples", interval_count, sample_count);
