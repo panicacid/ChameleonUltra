@@ -159,30 +159,21 @@ static void hitag2_send_start_auth(void) {
  */
 static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                                            uint16_t *intervals, int max_intervals) {
-    // Find min/max for DYNAMIC thresholding
-    // Filter out "ghost zero" - ignore samples < 4000 ADC (field-off transients AND antenna ringing)
-    // This prevents low startup values and switching noise from skewing the threshold
-    uint16_t min_sample = 4095, max_sample = 0;
+    // Calculate AVERAGE threshold for DC-balanced Manchester signal
+    // Manchester encoding has 50% duty cycle, so arithmetic mean is ideal threshold
+    // This naturally filters outliers and centers on actual signal
+    // Note: max sum is 4095 * 8192 = ~33M, fits safely in uint32_t
+    uint32_t sum = 0;
     for (int i = 0; i < sample_count; i++) {
-        // Only consider samples > 4000 for min (ignore antenna ringing/switching noise)
-        if (samples[i] > 4000 && samples[i] < min_sample) {
-            min_sample = samples[i];
-        }
-        if (samples[i] > max_sample) {
-            max_sample = samples[i];
-        }
+        sum += samples[i];
     }
     
-    // DYNAMIC THRESHOLD: Calculate from actual signal
-    // This automatically adapts to varying signal levels:
-    // - Paxton tags: HIGH ~13900, LOW ~5850 → threshold ~9875
-    // - Other tags: Different levels → automatically centered
-    uint16_t threshold = (min_sample + max_sample) / 2;
+    // AVERAGE THRESHOLD: Natural center of DC-balanced signal
+    // For shallow modulation (11600-14000): average ~12800, not midpoint ~9000
+    // This fixes "threshold too low" issue where min/max was sensitive to outliers
+    uint16_t threshold = sum / sample_count;
     
-    NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV)",
-                 min_sample, (min_sample * 3300) / 4095,
-                 max_sample, (max_sample * 3300) / 4095);
-    NRF_LOG_INFO("DYNAMIC threshold: %d ADC (~%dmV) - midpoint between min/max",
+    NRF_LOG_INFO("AVERAGE threshold: %d ADC (~%dmV) - arithmetic mean of all samples",
                  threshold, (threshold * 3300) / 4095);
     
     int16_t last_sample = -1;
