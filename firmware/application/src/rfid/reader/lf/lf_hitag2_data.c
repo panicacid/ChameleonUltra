@@ -159,18 +159,28 @@ static void hitag2_send_start_auth(void) {
  */
 static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                                            uint16_t *intervals, int max_intervals) {
-    // STEADY-STATE ANALYSIS: Skip startup period to eliminate transients
-    // Skip first 25% of buffer (~2000 samples) to allow field stabilization
-    // This eliminates 4004 ADC startup glitches that poison threshold calculation
-    int start_idx = sample_count / 4;
+    // POST-TRANSMISSION ANALYSIS: Skip muzzle flash (RFIDler strategy)
+    // Skip first 1200 samples (~10ms) to eliminate:
+    //   - Power-up transients (2.5ms)
+    //   - START_AUTH transmission (~1ms)
+    //   - TX->RX wait period (5ms)
+    // This ensures we analyze only the tag's response, not reader noise
+    int start_idx = 1200;
     
-    NRF_LOG_INFO("Using STEADY-STATE region: samples %d-%d (last 75%% of buffer)",
-                 start_idx, sample_count);
+    // Safety check: ensure buffer is large enough
+    if (sample_count < start_idx + 100) {
+        NRF_LOG_WARNING("Buffer too small for post-TX analysis (need %d+, got %d)", 
+                        start_idx + 100, sample_count);
+        return 0;
+    }
     
-    // Calculate min/max on STABLE REGION only (no voltage filter needed)
+    NRF_LOG_INFO("Using POST-TX region: samples %d-%d (skipped %dms muzzle flash)",
+                 start_idx, sample_count, (start_idx * 8) / 1000);
+    
+    // Calculate min/max on POST-TX REGION only (no voltage filter needed)
     uint16_t min_sample = 4095, max_sample = 0;
     for (int i = start_idx; i < sample_count; i++) {
-        // No voltage filter - time-based filtering handles startup
+        // No voltage filter - we've skipped the noisy startup/TX period
         if (samples[i] < min_sample) {
             min_sample = samples[i];
         }
@@ -180,7 +190,7 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     }
     
     // SQUELCH: Check signal strength to kill ghost tags
-    // Lower threshold (1000) for weak/shallow modulation tags
+    // Sensitive threshold (1000) for weak/shallow modulation tags
     uint16_t swing = max_sample - min_sample;
     if (swing < 1000) {
         NRF_LOG_INFO("SQUELCH: Signal too weak (swing=%d ADC) - no tag present", swing);
@@ -188,7 +198,7 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     }
     
     // Calculate STANDARD MIDPOINT threshold
-    // With steady-state filtering, min is real signal LOW (e.g., 11800)
+    // With post-TX filtering, min is real tag modulation LOW (e.g., 11800)
     // Midpoint is mathematically correct: (11800 + 14000) / 2 = 12900
     uint16_t threshold = (min_sample + max_sample) / 2;
     
@@ -196,7 +206,7 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                  min_sample, (min_sample * 3300) / 4095,
                  max_sample, (max_sample * 3300) / 4095,
                  swing);
-    NRF_LOG_INFO("STEADY-STATE threshold: %d ADC (~%dmV) - midpoint of stable signal",
+    NRF_LOG_INFO("POST-TX threshold: %d ADC (~%dmV) - analyzing tag response only",
                  threshold, (threshold * 3300) / 4095);
     
     int16_t last_sample = -1;
