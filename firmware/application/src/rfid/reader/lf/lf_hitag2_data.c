@@ -384,15 +384,35 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         NRF_LOG_INFO("Feeding all %d intervals to decoder", edge_count);
     }
     
-    // Feed intervals to Manchester decoder starting from SOF (or start if no SOF found)
+    // Feed intervals to Manchester decoder with phase retry
+    // Try Phase A (from SOF), then Phase B (from SOF+1) if needed
     bool ok = false;
+    
+    // Phase A: Try from SOF position
+    NRF_LOG_INFO("Phase A: Attempting decode from index %d", decode_start);
+    codec_reset_data(codec);
     for (int i = decode_start; i < edge_count; i++) {
         if (hitag2.decoder.feed(codec, intervals[i])) {
             memcpy(data, hitag2.get_data(codec), hitag2.data_size);
             ok = true;
-            NRF_LOG_INFO("SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
+            NRF_LOG_INFO("Phase A SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
                         data[0], data[1], data[2], data[3]);
             break;
+        }
+    }
+    
+    // Phase B: If Phase A failed, try from SOF+1 (180° phase shift)
+    if (!ok && decode_start + 1 < edge_count) {
+        NRF_LOG_INFO("Phase A failed, trying Phase B from index %d (180° phase shift)", decode_start + 1);
+        codec_reset_data(codec);
+        for (int i = decode_start + 1; i < edge_count; i++) {
+            if (hitag2.decoder.feed(codec, intervals[i])) {
+                memcpy(data, hitag2.get_data(codec), hitag2.data_size);
+                ok = true;
+                NRF_LOG_INFO("Phase B SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
+                            data[0], data[1], data[2], data[3]);
+                break;
+            }
         }
     }
     
