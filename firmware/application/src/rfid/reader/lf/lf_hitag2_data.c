@@ -160,8 +160,8 @@ static void hitag2_send_start_auth(void) {
 static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                                            uint16_t *intervals, int max_intervals) {
     // Find min/max for DYNAMIC thresholding
-    // Filter out "ghost zero" - ignore samples < 1000 ADC (field-off transients)
-    // This prevents low startup values from skewing the threshold
+    // Filter out "ghost zero" - ignore samples < 4000 ADC (field-off transients AND antenna ringing)
+    // This prevents low startup values and switching noise from skewing the threshold
     uint16_t min_sample = 4095, max_sample = 0;
     for (int i = 0; i < sample_count; i++) {
         // Only consider samples > 4000 for min (ignore antenna ringing/switching noise)
