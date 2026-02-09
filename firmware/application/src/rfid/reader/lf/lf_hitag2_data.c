@@ -177,16 +177,26 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     NRF_LOG_INFO("Using POST-TX region: samples %d-%d (skipped %dms muzzle flash)",
                  start_idx, sample_count, (start_idx * 8) / 1000);
     
-    // Calculate min/max on POST-TX REGION only (no voltage filter needed)
+    // Calculate AVERAGE threshold on POST-TX region (statistical robustness)
+    // Track min/max for squelch, sum for average
     uint16_t min_sample = 4095, max_sample = 0;
+    uint32_t sum = 0;
+    int valid_samples = 0;
+    
     for (int i = start_idx; i < sample_count; i++) {
-        // No voltage filter - we've skipped the noisy startup/TX period
-        if (samples[i] < min_sample) {
-            min_sample = samples[i];
+        uint16_t sample = samples[i];
+        
+        // Track min/max for squelch
+        if (sample < min_sample) {
+            min_sample = sample;
         }
-        if (samples[i] > max_sample) {
-            max_sample = samples[i];
+        if (sample > max_sample) {
+            max_sample = sample;
         }
+        
+        // Accumulate sum for average
+        sum += sample;
+        valid_samples++;
     }
     
     // SQUELCH: Check signal strength to kill ghost tags
@@ -197,17 +207,18 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
         return 0;  // No edges - ghost tag killed
     }
     
-    // Calculate STANDARD MIDPOINT threshold
-    // With post-TX filtering, min is real tag modulation LOW (e.g., 11800)
-    // Midpoint is mathematically correct: (11800 + 14000) / 2 = 12900
-    uint16_t threshold = (min_sample + max_sample) / 2;
+    // Calculate AVERAGE threshold (outlier-resistant)
+    // Democracy principle: One glitch at 2412 + 5999 samples at 10000 = average ~10000
+    // Midpoint would be: (2412 + 11488) / 2 = 6950 (FAILS - too low)
+    // Average: sum / count = ~10000 (WORKS - centered on real signal)
+    uint16_t threshold = sum / valid_samples;
     
     NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV), swing=%d ADC",
                  min_sample, (min_sample * 3300) / 4095,
                  max_sample, (max_sample * 3300) / 4095,
                  swing);
-    NRF_LOG_INFO("POST-TX threshold: %d ADC (~%dmV) - analyzing tag response only",
-                 threshold, (threshold * 3300) / 4095);
+    NRF_LOG_INFO("POST-TX AVERAGE threshold: %d ADC (~%dmV) - outlier-resistant (N=%d)",
+                 threshold, (threshold * 3300) / 4095, valid_samples);
     
     int16_t last_sample = -1;
     int last_edge_index = 0;
