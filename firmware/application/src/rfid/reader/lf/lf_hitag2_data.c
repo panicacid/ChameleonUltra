@@ -159,21 +159,37 @@ static void hitag2_send_start_auth(void) {
  */
 static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                                            uint16_t *intervals, int max_intervals) {
-    // Calculate AVERAGE threshold for DC-balanced Manchester signal
-    // Manchester encoding has 50% duty cycle, so arithmetic mean is ideal threshold
-    // This naturally filters outliers and centers on actual signal
-    // Note: max sum is 4095 * 8192 = ~33M, fits safely in uint32_t
-    uint32_t sum = 0;
+    // FILTERED MIN/MAX with SQUELCH to prevent ghost tags
+    // High-pass filter: ignore samples < 4000 ADC (filters 1100 noise floor)
+    // Real signal LOW is ~5800, noise floor is ~1100
+    uint16_t min_sample = 4095, max_sample = 0;
     for (int i = 0; i < sample_count; i++) {
-        sum += samples[i];
+        // Filter out noise floor and transients - only consider samples > 4000
+        if (samples[i] > 4000 && samples[i] < min_sample) {
+            min_sample = samples[i];
+        }
+        if (samples[i] > max_sample) {
+            max_sample = samples[i];
+        }
     }
     
-    // AVERAGE THRESHOLD: Natural center of DC-balanced signal
-    // For shallow modulation (11600-14000): average ~12800, not midpoint ~9000
-    // This fixes "threshold too low" issue where min/max was sensitive to outliers
-    uint16_t threshold = sum / sample_count;
+    // SQUELCH: Check signal strength to kill ghost tags
+    // Noise swings ~2000 ADC, real tags swing ~8000 ADC
+    uint16_t swing = max_sample - min_sample;
+    if (swing < 3000) {
+        NRF_LOG_INFO("SQUELCH: Signal too weak (swing=%d ADC) - no tag present", swing);
+        return 0;  // No edges - ghost tag killed
+    }
     
-    NRF_LOG_INFO("AVERAGE threshold: %d ADC (~%dmV) - arithmetic mean of all samples",
+    // Calculate threshold as midpoint of filtered min/max
+    // With min=5800, max=14000 → threshold=9900 (properly centered!)
+    uint16_t threshold = (min_sample + max_sample) / 2;
+    
+    NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV), swing=%d ADC",
+                 min_sample, (min_sample * 3300) / 4095,
+                 max_sample, (max_sample * 3300) / 4095,
+                 swing);
+    NRF_LOG_INFO("FILTERED threshold: %d ADC (~%dmV) - midpoint of signal range",
                  threshold, (threshold * 3300) / 4095);
     
     int16_t last_sample = -1;
