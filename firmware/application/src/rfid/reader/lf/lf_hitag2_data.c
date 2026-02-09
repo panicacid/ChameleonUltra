@@ -223,14 +223,17 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     // DERIVATIVE-BASED EDGE DETECTION (Smoothing + Slope Analysis)
     // More robust to amplitude variations and noise than threshold crossing
     NRF_LOG_INFO("Using derivative edge detection with 3-point smoothing");
+    NRF_LOG_INFO("Dynamic derivative threshold: %d ADC (swing/4 = %d/4)", swing/4, swing);
     
     int last_edge_index = 0;
     int interval_count = 0;
     int16_t last_smoothed = -1;
     
-    // Derivative threshold - detects significant slope changes
-    // Experimentally tuned for Hitag2 signal characteristics
-    const int16_t DERIVATIVE_THRESHOLD = 500;  // ADC units per sample
+    // DYNAMIC Derivative threshold - adapts to signal strength
+    // swing/4 provides adaptive sensitivity for varying signal levels
+    // Weak signal (swing=2000): threshold=500
+    // Strong signal (swing=8000): threshold=2000
+    int16_t DERIVATIVE_THRESHOLD = swing / 4;
     
     for (int i = 1; i < sample_count - 1 && interval_count < max_intervals; i++) {
         // 3-point moving average smoothing to reduce noise
