@@ -275,9 +275,9 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     
     // Continuous drain loop: don't sleep, actively drain buffer for 50ms
     // This prevents circular buffer overflow and captures complete tag response
-    autotimer_enable(50000);  // 50ms timeout
+    autotimer *p_at = bsp_obtain_timer(0);  // Obtain timer with 0 initial value
     
-    while (!autotimer_is_timeout() && sample_count < 8192) {
+    while (NO_TIMEOUT_1MS(p_at, 50) && sample_count < 8192) {
         uint16_t val;
         // Drain all available samples from circular buffer
         while (cb_pop_front(&cb, &val) && sample_count < 8192) {
@@ -293,6 +293,8 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         // Brief yield to allow SAADC interrupt to fire
         bsp_delay_us(100);
     }
+    
+    bsp_return_timer(p_at);  // Return timer to pool
     
     NRF_LOG_INFO("Collected %d SAADC samples", sample_count);
     
