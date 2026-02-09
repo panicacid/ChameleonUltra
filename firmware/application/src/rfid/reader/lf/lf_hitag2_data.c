@@ -27,7 +27,11 @@ NRF_LOG_MODULE_REGISTER();
 #define HITAG2_START_AUTH_BITS    5
 #define HITAG2_START_AUTH_CMD     0xC0  // 11000xxx in binary
 
-#define HITAG2_BUFFER_SIZE        128
+// Buffer size calculation:
+// PWM at 125kHz = 125,000 samples/second
+// 50ms collection = 6,250 samples needed
+// Use 8192 (power of 2) for 30% safety margin
+#define HITAG2_BUFFER_SIZE        8192  // Was 128 - CRITICAL FIX for buffer overflow
 
 static circular_buffer cb;
 
