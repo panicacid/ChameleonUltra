@@ -181,15 +181,17 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
         return 0;  // No edges - ghost tag killed
     }
     
-    // Calculate threshold as midpoint of filtered min/max
-    // With min=5800, max=14000 → threshold=9900 (properly centered!)
-    uint16_t threshold = (min_sample + max_sample) / 2;
+    // Calculate TOP-BIASED threshold to catch shallow modulation
+    // For shallow modulation (e.g., 11600-14360), midpoint fails
+    // Top-biased: (max*3 + min)/4 places threshold in the dip
+    // Example: (14360*3 + 4008)/4 = 11772 (catches 11600 dip!)
+    uint16_t threshold = ((uint32_t)max_sample * 3 + min_sample) / 4;
     
     NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV), swing=%d ADC",
                  min_sample, (min_sample * 3300) / 4095,
                  max_sample, (max_sample * 3300) / 4095,
                  swing);
-    NRF_LOG_INFO("FILTERED threshold: %d ADC (~%dmV) - midpoint of signal range",
+    NRF_LOG_INFO("TOP-BIASED threshold: %d ADC (~%dmV) - 75%% toward carrier for shallow modulation",
                  threshold, (threshold * 3300) / 4095);
     
     int16_t last_sample = -1;
