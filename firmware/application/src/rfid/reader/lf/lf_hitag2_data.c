@@ -164,8 +164,8 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     // This prevents low startup values from skewing the threshold
     uint16_t min_sample = 4095, max_sample = 0;
     for (int i = 0; i < sample_count; i++) {
-        // Only consider samples > 1000 for min (ignore field-off)
-        if (samples[i] > 1000 && samples[i] < min_sample) {
+        // Only consider samples > 4000 for min (ignore antenna ringing/switching noise)
+        if (samples[i] > 4000 && samples[i] < min_sample) {
             min_sample = samples[i];
         }
         if (samples[i] > max_sample) {
@@ -213,10 +213,10 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                 uint16_t interval_us = sample_interval * MICROSECONDS_PER_SAMPLE;
                 
                 // FIXED: Remove 255µs cap - use full uint16_t range
-                // FIXED: Filter noise - skip intervals <10µs (high sensitivity mode)
+                // FIXED: Filter noise - skip intervals <20µs (balanced sensitivity)
                 // FIXED: Skip field stabilization - first edge if >1000µs
-                if (interval_us < 10) {
-                    // Skip only severe glitches - capture all real edges including jittery ones
+                if (interval_us < 20) {
+                    // Skip glitches - safe middle ground between sensitivity and noise rejection
                     last_edge_index = i;
                 } else if (interval_count == 0 && interval_us > 1000) {
                     // Skip field stabilization (first long edge)
