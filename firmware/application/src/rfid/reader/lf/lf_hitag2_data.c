@@ -197,15 +197,17 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                 // Calculate interval in sample units
                 int sample_interval = i - last_edge_index;
                 
-                // Store raw sample interval (NOT in µs!)
-                // Manchester decoder expects relative interval values, not absolute µs
-                // Sample intervals should be in the range matching decoder thresholds (48, 112)
+                // Convert to microseconds: SAADC runs at 125kHz (PWM 500kHz/4)
+                // 1 sample = 1000000µs / 125000 = 8µs per sample
+                // Decoder thresholds: T_LOW=0x30 (48), T_HIGH=0x70 (112)
+                // These are in 8µs units, so intervals already match!
+                // Store directly as they're already in correct time units
                 intervals[interval_count++] = (sample_interval > 0xFF) ? 0xFF : (uint16_t)sample_interval;
                 last_edge_index = i;
                 
                 if (interval_count <= 10) {
-                    NRF_LOG_INFO("Edge %d at sample %d, interval=%d samples", 
-                                 interval_count, i, sample_interval);
+                    NRF_LOG_INFO("Edge %d: interval=%d samples (~%dµs)", 
+                                 interval_count, sample_interval, sample_interval * 8);
                 }
             }
         }
@@ -334,9 +336,42 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         return false;
     }
     
-    // Feed intervals to Manchester decoder
-    bool ok = false;
+    // Hitag2 tag response format:
+    // SOF (Start of Frame): 5 consecutive '1' bits = 11111 pattern
+    // Then: Manchester encoded data (UID: 32 bits)
+    //
+    // The SOF appears as a series of short intervals (~48 = 0x30)
+    // We need to detect this pattern before starting Manchester decode
+    
+    // Look for SOF: sequence of ~5 short intervals indicating 11111
+    int sof_start = -1;
+    int consecutive_short = 0;
+    
     for (int i = 0; i < edge_count; i++) {
+        // Check if interval is "short" (T_LOW range: 48 ± 32 = 16-80)
+        if (intervals[i] >= 16 && intervals[i] <= 80) {
+            consecutive_short++;
+            if (consecutive_short >= 5) {  // Found SOF (5 or more short intervals)
+                sof_start = i - 4;  // Start of SOF sequence
+                NRF_LOG_INFO("SOF detected at edge %d (5+ short intervals)", sof_start);
+                break;
+            }
+        } else {
+            consecutive_short = 0;  // Reset on non-short interval
+        }
+    }
+    
+    // Start decoding after SOF
+    int decode_start = (sof_start >= 0) ? (sof_start + 5) : 0;
+    if (sof_start >= 0) {
+        NRF_LOG_INFO("Starting Manchester decode after SOF at edge %d", decode_start);
+    } else {
+        NRF_LOG_WARNING("SOF not detected, starting decode from beginning");
+    }
+    
+    // Feed intervals to Manchester decoder starting after SOF
+    bool ok = false;
+    for (int i = decode_start; i < edge_count; i++) {
         if (hitag2.decoder.feed(codec, intervals[i])) {
             memcpy(data, hitag2.get_data(codec), hitag2.data_size);
             ok = true;
