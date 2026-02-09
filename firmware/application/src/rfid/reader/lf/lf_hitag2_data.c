@@ -357,12 +357,36 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         NRF_LOG_INFO("INT[%d]: %dµs", i, intervals[i]);
     }
     
-    // Feed ALL intervals to Manchester decoder (SOF skip disabled for Paxton debugging)
-    // The decoder should handle SOF internally, or we'll see F8... pattern if present
-    NRF_LOG_INFO("Feeding all %d intervals to decoder (SOF skip disabled)", edge_count);
+    // SOF Detection: Scan for 5 consecutive short intervals (80-160µs)
+    // This identifies the 11111 SOF header (112µs, 144µs pulses)
+    int sof_start = -1;
+    for (int i = 0; i < edge_count - 5; i++) {
+        int consecutive_short = 0;
+        for (int j = 0; j < 5; j++) {
+            if (intervals[i+j] >= 80 && intervals[i+j] <= 160) {
+                consecutive_short++;
+            }
+        }
+        if (consecutive_short >= 5) {
+            sof_start = i;
+            NRF_LOG_INFO("SOF detected at index %d (5+ consecutive 80-160µs intervals)", sof_start);
+            break;
+        }
+    }
     
+    // Determine start position for decoder
+    int decode_start = (sof_start >= 0) ? sof_start : 0;
+    if (sof_start >= 0) {
+        NRF_LOG_INFO("Starting decode from SOF at index %d (%d intervals to process)", 
+                    sof_start, edge_count - sof_start);
+    } else {
+        NRF_LOG_WARNING("No SOF detected - starting from beginning (may fail)");
+        NRF_LOG_INFO("Feeding all %d intervals to decoder", edge_count);
+    }
+    
+    // Feed intervals to Manchester decoder starting from SOF (or start if no SOF found)
     bool ok = false;
-    for (int i = 0; i < edge_count; i++) {
+    for (int i = decode_start; i < edge_count; i++) {
         if (hitag2.decoder.feed(codec, intervals[i])) {
             memcpy(data, hitag2.get_data(codec), hitag2.data_size);
             ok = true;
