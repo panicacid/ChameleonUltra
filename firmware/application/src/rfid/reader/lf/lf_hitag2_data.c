@@ -197,17 +197,20 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                 // Calculate interval in sample units
                 int sample_interval = i - last_edge_index;
                 
-                // Convert to microseconds: SAADC runs at 125kHz (PWM 500kHz/4)
-                // 1 sample = 1000000µs / 125000 = 8µs per sample
-                // Decoder thresholds: T_LOW=0x30 (48), T_HIGH=0x70 (112)
-                // These are in 8µs units, so intervals already match!
-                // Store directly as they're already in correct time units
-                intervals[interval_count++] = (sample_interval > 0xFF) ? 0xFF : (uint16_t)sample_interval;
+                // CRITICAL: Convert to microseconds for decoder
+                // SAADC runs at 125kHz (PWM 500kHz/4) = 8µs per sample
+                // Decoder expects µs: T_LOW=48µs (0x30), T_HIGH=112µs (0x70)
+                // Hitag2 short pulse ~125µs = ~15-16 samples = 120-128µs
+                const uint8_t MICROSECONDS_PER_SAMPLE = 8;
+                uint16_t interval_us = sample_interval * MICROSECONDS_PER_SAMPLE;
+                
+                // Store in microseconds (cap at 255 for uint8_t decoder)
+                intervals[interval_count++] = (interval_us > 0xFF) ? 0xFF : (uint16_t)interval_us;
                 last_edge_index = i;
                 
                 if (interval_count <= 10) {
-                    NRF_LOG_INFO("Edge %d: interval=%d samples (~%dµs)", 
-                                 interval_count, sample_interval, sample_interval * 8);
+                    NRF_LOG_INFO("Edge %d: %d samples = %dµs", 
+                                 interval_count, sample_interval, interval_us);
                 }
             }
         }
@@ -340,20 +343,27 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     // SOF (Start of Frame): 5 consecutive '1' bits = 11111 pattern
     // Then: Manchester encoded data (UID: 32 bits)
     //
-    // The SOF appears as a series of short intervals (~48 = 0x30)
-    // We need to detect this pattern before starting Manchester decode
+    // The SOF appears as a series of short intervals
+    // Short pulse in Hitag2 ~125µs, decoder T_LOW = 48µs (0x30)
+    // With jitter: 16-80µs is T_LOW range
     
     // Look for SOF: sequence of ~5 short intervals indicating 11111
     int sof_start = -1;
     int consecutive_short = 0;
     
+    // SOF detection thresholds in MICROSECONDS (now that intervals are in µs)
+    // Hitag2 short pulse ~125µs, with jitter allow 80-170µs range
+    const uint16_t SOF_SHORT_MIN = 80;   // Minimum µs for short interval
+    const uint16_t SOF_SHORT_MAX = 170;  // Maximum µs for short interval
+    
     for (int i = 0; i < edge_count; i++) {
-        // Check if interval is "short" (T_LOW range: 48 ± 32 = 16-80)
-        if (intervals[i] >= 16 && intervals[i] <= 80) {
+        // Check if interval is "short" (in microseconds now!)
+        if (intervals[i] >= SOF_SHORT_MIN && intervals[i] <= SOF_SHORT_MAX) {
             consecutive_short++;
             if (consecutive_short >= 5) {  // Found SOF (5 or more short intervals)
                 sof_start = i - 4;  // Start of SOF sequence
-                NRF_LOG_INFO("SOF detected at edge %d (5+ short intervals)", sof_start);
+                NRF_LOG_INFO("SOF detected at edge %d (5+ short intervals %d-%dµs)", 
+                            sof_start, SOF_SHORT_MIN, SOF_SHORT_MAX);
                 break;
             }
         } else {
