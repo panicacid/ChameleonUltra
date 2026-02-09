@@ -390,7 +390,7 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     
     // Phase A: Try from SOF position
     NRF_LOG_INFO("Phase A: Attempting decode from index %d", decode_start);
-    codec_reset_data(codec);
+    hitag2.decoder.start(codec, 0);  // Reset decoder state
     for (int i = decode_start; i < edge_count; i++) {
         if (hitag2.decoder.feed(codec, intervals[i])) {
             memcpy(data, hitag2.get_data(codec), hitag2.data_size);
@@ -404,7 +404,7 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     // Phase B: If Phase A failed, try from SOF+1 (180° phase shift)
     if (!ok && decode_start + 1 < edge_count) {
         NRF_LOG_INFO("Phase A failed, trying Phase B from index %d (180° phase shift)", decode_start + 1);
-        codec_reset_data(codec);
+        hitag2.decoder.start(codec, 0);  // Reset decoder state
         for (int i = decode_start + 1; i < edge_count; i++) {
             if (hitag2.decoder.feed(codec, intervals[i])) {
                 memcpy(data, hitag2.get_data(codec), hitag2.data_size);
