@@ -217,10 +217,11 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     // Step A: Calculate center threshold
     uint16_t center = (min_sample + max_sample) / 2;
     
-    // Step B: Define hysteresis (5% noise margin - tighter for better timing)
-    // Tighter hysteresis reduces edge detection delay, improving timing accuracy
-    // Was /10 (10%), now /20 (5%) to reduce timing lag from LPF gentle slopes
-    uint16_t hysteresis = (max_sample - min_sample) / 20;
+    // Step B: Define hysteresis (2.5% noise margin - MAXIMUM sensitivity)
+    // REDESIGN: Doubled sensitivity (was /20 = 5%, now /40 = 2.5%)
+    // More sensitive to weak/fading edges at end of tag transmission
+    // Risk: More noise, but SOF filter handles false positives
+    uint16_t hysteresis = (max_sample - min_sample) / 40;
     uint16_t high_thresh = center + hysteresis;
     uint16_t low_thresh = center - hysteresis;
     
@@ -320,15 +321,17 @@ static void hitag2_timeslot_callback(void) {
  * This translator normalizes tag timing to standard decoder expectations.
  */
 static uint8_t translate_interval(uint16_t real_us) {
-    // Real Short (60-185µs) → Decoder Short (128µs)
-    // WIDENED: Was 80-180, now 60-185 to capture timing variations
-    if (real_us >= 60 && real_us <= 185) {
+    // Real Short (60-180µs) → Decoder Short (128µs)
+    // REDESIGN: Fixed boundary gap (was <=185 then >185, created no-man's-land at 186-191µs)
+    // Clean boundaries: 60-180 SHORT, 181-380 LONG
+    if (real_us >= 60 && real_us < 181) {
         return 128;  // HITAG_T_SHORT - decoder recognizes as period 0
     }
     
-    // Real Long (186-380µs) → Decoder Long (200µs)
-    // WIDENED: Was 181-350, now 186-380 for better tolerance
-    if (real_us > 185 && real_us <= 380) {
+    // Real Long (181-380µs) → Decoder Long (200µs)
+    // REDESIGN: Start at 181 (not 186) to eliminate gap
+    // Safely > 192 threshold, decoder recognizes as period 2
+    if (real_us >= 181 && real_us <= 380) {
         return 200;  // Safely > 192 threshold, decoder recognizes as period 2
     }
     
@@ -448,6 +451,13 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     if (sof_start >= 0) {
         NRF_LOG_INFO("Starting decode from SOF at index %d (%d intervals to process)", 
                     sof_start, edge_count - sof_start);
+        
+        // DIAGNOSTIC: Log first 10 intervals with translations
+        NRF_LOG_INFO("First intervals (raw → translated):");
+        for (int i = sof_start; i < edge_count && i < sof_start + 10; i++) {
+            uint8_t translated = translate_interval(intervals[i]);
+            NRF_LOG_INFO("  INT[%d]: %dµs → %d", i - sof_start, intervals[i], translated);
+        }
     } else {
         NRF_LOG_WARNING("No SOF detected - starting from beginning (may fail)");
         NRF_LOG_INFO("Feeding all %d intervals to decoder", edge_count);
