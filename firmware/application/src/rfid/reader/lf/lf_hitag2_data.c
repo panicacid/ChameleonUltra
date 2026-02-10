@@ -227,17 +227,25 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
     
     NRF_LOG_INFO("Synchronous Phase-Sampling decoder with clock recovery");
     
-    // Step 1: Apply low-pass filter y[n] = (x[n] + x[n-1]) / 2
+    // Step 1: Apply 4-sample moving average to nullify 125kHz carrier
+    // This averages 4 samples (32µs) to cancel out carrier oscillations
     uint16_t *filtered = (uint16_t *)malloc(sample_count * sizeof(uint16_t));
     if (!filtered) {
         NRF_LOG_ERROR("Failed to allocate filter buffer");
         return false;
     }
     
-    filtered[start_idx] = samples[start_idx];
-    for (int i = start_idx + 1; i < sample_count; i++) {
-        filtered[i] = (samples[i] + samples[i-1]) / 2;
+    // Initialize first 3 samples
+    for (int i = start_idx; i < start_idx + 3 && i < sample_count; i++) {
+        filtered[i] = samples[i];
     }
+    
+    // 4-sample moving average: filtered[i] = (x[i] + x[i-1] + x[i-2] + x[i-3]) / 4
+    for (int i = start_idx + 3; i < sample_count; i++) {
+        filtered[i] = (samples[i] + samples[i-1] + samples[i-2] + samples[i-3]) / 4;
+    }
+    
+    NRF_LOG_INFO("Applied 4-sample carrier-nulling filter");
     
     // Step 2: Find quiet zone (low variance = stable carrier)
     #define QUIET_WINDOW 100
@@ -278,13 +286,15 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
     int peak_count = 0;
     
     for (int i = preamble_start + 1; i < sample_count - 1 && peak_count < 5; i++) {
-        // Local maximum above center
+        // Local maximum with 150 ADC hysteresis to filter noise
+        // Peak must be 150 ADC above baseline to prevent carrier ripple detection
         if (filtered[i] > filtered[i-1] && 
             filtered[i] > filtered[i+1] &&
-            filtered[i] > center) {
+            filtered[i] > center + 150) {  // Hysteresis: 150 ADC above baseline
             
             peaks[peak_count] = i;
-            NRF_LOG_INFO("Preamble peak %d at sample %d", peak_count + 1, i);
+            NRF_LOG_INFO("Preamble peak %d at sample %d (height=%d above center)", 
+                        peak_count + 1, i, filtered[i] - center);
             peak_count++;
             i += 20;  // Skip to avoid double-counting
         }
@@ -303,12 +313,17 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
     
     NRF_LOG_INFO("Clock recovery: τ=%d samples (%dµs)", tau_samples, tau_us);
     
-    // Validate τ is reasonable (200-450µs for Hitag2)
-    if (tau_us < 200 || tau_us > 450) {
-        NRF_LOG_ERROR("τ out of range: %dµs (expect 200-450µs)", tau_us);
+    // Strict validation: Hitag2 cannot be faster than 224µs (28 samples)
+    // Anything lower is carrier ripple, not tag modulation
+    if (tau_samples < 28 || tau_samples > 56) {
+        NRF_LOG_ERROR("τ out of range: %d samples (%dµs) - expect 28-56 samples (224-448µs)", 
+                     tau_samples, tau_us);
+        NRF_LOG_ERROR("This is likely carrier ripple, not tag modulation");
         free(filtered);
         return false;
     }
+    
+    NRF_LOG_INFO("Clock recovery validated: τ=%d samples (%dµs) ✓", tau_samples, tau_us);
     
     // Step 6: Calculate data start (5.5 bit periods after first peak)
     // 5 preamble bits + 0.5 to center in first data bit
