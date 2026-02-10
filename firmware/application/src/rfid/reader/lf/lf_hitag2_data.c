@@ -16,6 +16,9 @@
 #include "nrf_log_default_backends.h"
 NRF_LOG_MODULE_REGISTER();
 
+// External PWM sequence for soft pulse control
+extern nrf_pwm_values_individual_t m_lf_125khz_pwm_seq_val[];
+
 // Hitag2 protocol timing constants (in microseconds)
 // Based on Proxmark3 hitag2.c and Hitag2 specification
 // At 125kHz: 1 carrier period (Tc) = 8μs
@@ -42,6 +45,14 @@ NRF_LOG_MODULE_REGISTER();
 #define HITAG2_ADC_THRESHOLD_CALIBRATED 1395  // 1.125V for reliable 2.25V weak peak detection
 
 static circular_buffer cb;
+
+/**
+ * Set LF PWM duty cycle for soft pulse control
+ * @param duty Duty cycle value (0 = 0%, 2 = 50% with top_value=4)
+ */
+static void set_lf_pwm_duty(uint16_t duty) {
+    m_lf_125khz_pwm_seq_val[0].channel_0 = duty;
+}
 
 // SAADC callback for receiving tag response (analog sampling)
 // Similar to HID implementation but for Hitag2 response detection
@@ -89,13 +100,13 @@ static void uninit_hitag2_hw(void) {
  * @param bit The bit value (0 or 1)
  */
 static void hitag2_send_bit(uint8_t bit) {
-    // Start with PULSE (field OFF) - this is the BPLM signature
-    stop_lf_125khz_radio();
+    // Soft pulse LOW: reduce duty cycle to 0 (field reduces but doesn't hard-stop)
+    set_lf_pwm_duty(0);
     bsp_delay_us(HITAG2_PWM_SETTLE_US);  // Let PWM ramp down cleanly
     bsp_delay_us(HITAG2_BPLM_PULSE_US - HITAG2_PWM_SETTLE_US);  // Rest of pulse time
     
-    // Then field ON for duration that encodes the bit value
-    start_lf_125khz_radio();
+    // Restore duty cycle to 2 (50% = field on)
+    set_lf_pwm_duty(2);
     bsp_delay_us(HITAG2_PWM_SETTLE_US);  // Let PWM stabilize ON
     
     if (bit & 0x01) {
@@ -116,24 +127,23 @@ static void hitag2_send_bit(uint8_t bit) {
 static void hitag2_send_start_auth(void) {
     uint8_t cmd = HITAG2_START_AUTH_CMD;
     
-    NRF_LOG_INFO("Transmitting START_AUTH with BPLM encoding...");
+    NRF_LOG_INFO("Transmitting START_AUTH with BPLM encoding (soft pulse)...");
     
     // Send 5 bits MSB first: 1, 1, 0, 0, 0
-    // Bit positions in 0xC0 (11000000):
-    // Bit 7: 1, Bit 6: 1, Bit 5: 0, Bit 4: 0, Bit 3: 0
-    // 
-    // CRITICAL: Use explicit loop counter to ensure exactly 5 bits are sent
-    // PicoScope confirmed previous loop only sent 4 bits!
     for (int i = 0; i < HITAG2_START_AUTH_BITS; i++) {
         uint8_t bit = (cmd >> (7 - i)) & 0x01;
         NRF_LOG_INFO("Bit %d: %d", i, bit);
         hitag2_send_bit(bit);
     }
     
-    // Field stays ON continuously after last bit
-    // Tag will see complete command and respond with full UID
-    // Terminating pulse removed - was causing tag to reset/truncate response
+    // Add soft terminating pulse to mark end of bit 5
+    // This ensures tag sees all 5 bits correctly
+    NRF_LOG_INFO("Adding soft terminating pulse");
+    set_lf_pwm_duty(0);  // Soft pulse low
+    bsp_delay_us(HITAG2_BPLM_PULSE_US);
+    set_lf_pwm_duty(2);  // Restore to 50% for listening
     
+    // Field now stays at 50% duty for tag response
     NRF_LOG_INFO("START_AUTH transmission complete - sent %d bits", HITAG2_START_AUTH_BITS);
 }
 
