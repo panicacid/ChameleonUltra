@@ -275,6 +275,7 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                     NRF_LOG_INFO("Edge %d: %d samples = %dµs (%s, sample=%d)", 
                                  interval_count, sample_interval, interval_us,
                                  state_high ? "RISING" : "FALLING", sample);
+                }
             }
         }
     }
