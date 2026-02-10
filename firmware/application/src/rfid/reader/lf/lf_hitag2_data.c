@@ -313,10 +313,10 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
     
     NRF_LOG_INFO("Clock recovery: τ=%d samples (%dµs)", tau_samples, tau_us);
     
-    // Strict validation: Hitag2 cannot be faster than 224µs (28 samples)
-    // Anything lower is carrier ripple, not tag modulation
-    if (tau_samples < 28 || tau_samples > 56) {
-        NRF_LOG_ERROR("τ out of range: %d samples (%dµs) - expect 28-56 samples (224-448µs)", 
+    // Validation: Accept fast Paxton tags (24 samples = 192µs minimum)
+    // Some tags operate slightly faster than standard
+    if (tau_samples < 24 || tau_samples > 56) {
+        NRF_LOG_ERROR("τ out of range: %d samples (%dµs) - expect 24-56 samples (192-448µs)", 
                      tau_samples, tau_us);
         NRF_LOG_ERROR("This is likely carrier ripple, not tag modulation");
         free(filtered);
