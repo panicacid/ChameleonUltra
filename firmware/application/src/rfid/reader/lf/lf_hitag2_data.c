@@ -160,193 +160,6 @@ static void hitag2_send_start_auth(void) {
  * @param max_intervals Maximum intervals to store
  * @return Number of intervals detected
  */
-static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
-                                           uint16_t *intervals, int max_intervals) {
-    // POST-TRANSMISSION ANALYSIS: Skip muzzle flash (RFIDler strategy)
-    // Skip first 1200 samples (~10ms) to eliminate:
-    //   - Power-up transients (2.5ms)
-    //   - START_AUTH transmission (~1ms)
-    //   - TX->RX wait period (5ms)
-    // SYNCHRONOUS MANCHESTER DECODER WITH PREAMBLE CLOCK RECOVERY
-    // Based on expert advice: Use 11111 preamble to recover tag's clock
-    // T0 = carrier period (1/125kHz), but frequency may vary - use sync to measure!
-    
-    // DYNAMIC QUIET ZONE DETECTION
-    // Don't use hard-coded skip! Find the real preamble start dynamically
-    // Tag responds ~5ms after command, but we need to find exactly when
-    
-    int start_idx = 200;  // Skip only initial TX noise
-    
-    if (sample_count < 5000) {
-        NRF_LOG_INFO("Not enough samples for detection");
-        return 0;
-    }
-    
-    NRF_LOG_INFO("Synchronous Manchester decoder with dynamic quiet zone detection");
-    
-    // Step 1: Apply low-pass filter y[n] = (x[n] + x[n-1]) / 2
-    // This smooths noise while preserving signal structure
-    uint16_t *filtered = (uint16_t *)malloc(sample_count * sizeof(uint16_t));
-    if (!filtered) {
-        NRF_LOG_INFO("Failed to allocate filter buffer");
-        return 0;
-    }
-    
-    filtered[start_idx] = samples[start_idx];
-    for (int i = start_idx + 1; i < sample_count; i++) {
-        filtered[i] = (samples[i] + samples[i-1]) / 2;
-    }
-    
-    // Step 2: Find quiet zone (unmodulated carrier before tag response)
-    // Quiet zone = low variance (stable carrier)
-    #define QUIET_WINDOW 100
-    #define QUIET_THRESHOLD 200
-    
-    int quiet_zone_end = start_idx;
-    for (int i = start_idx; i < sample_count - QUIET_WINDOW; i += 50) {
-        // Calculate variance in this window
-        uint32_t mean = 0;
-        for (int j = 0; j < QUIET_WINDOW; j++) {
-            mean += filtered[i + j];
-        }
-        mean /= QUIET_WINDOW;
-        
-        uint32_t variance = 0;
-        for (int j = 0; j < QUIET_WINDOW; j++) {
-            int32_t diff = (int32_t)filtered[i + j] - (int32_t)mean;
-            variance += diff * diff;
-        }
-        variance /= QUIET_WINDOW;
-        
-        if (variance < QUIET_THRESHOLD) {
-            quiet_zone_end = i + QUIET_WINDOW;
-            NRF_LOG_INFO("Quiet zone found ending at sample %d (~%dms)", quiet_zone_end, (quiet_zone_end * 8) / 1000);
-            break;
-        }
-    }
-    
-    // Step 3: Find modulation start (tag begins load-modulating)
-    // Modulation = high variance (signal varies)
-    int preamble_start = quiet_zone_end;
-    for (int i = quiet_zone_end; i < sample_count - QUIET_WINDOW; i += 10) {
-        uint32_t mean = 0;
-        for (int j = 0; j < QUIET_WINDOW; j++) {
-            mean += filtered[i + j];
-        }
-        mean /= QUIET_WINDOW;
-        
-        uint32_t variance = 0;
-        for (int j = 0; j < QUIET_WINDOW; j++) {
-            int32_t diff = (int32_t)filtered[i + j] - (int32_t)mean;
-            variance += diff * diff;
-        }
-        variance /= QUIET_WINDOW;
-        
-        if (variance > QUIET_THRESHOLD * 3) {
-            preamble_start = i;
-            NRF_LOG_INFO("Modulation start at sample %d (~%dms)", preamble_start, (preamble_start * 8) / 1000);
-            break;
-        }
-    }
-    
-    // Find baseline for peak detection from preamble region
-    uint16_t min_sample = 4095, max_sample = 0;
-    for (int i = preamble_start; i < preamble_start + 2000 && i < sample_count; i++) {
-        if (filtered[i] < min_sample) min_sample = filtered[i];
-        if (filtered[i] > max_sample) max_sample = filtered[i];
-    }
-    uint16_t center = (min_sample + max_sample) / 2;
-    
-    NRF_LOG_INFO("Signal baseline: center=%d, swing=%d", center, max_sample - min_sample);
-    
-    // Step 4: Find 5 preamble peaks from REAL preamble start (11111 sync pattern)
-    // These are falling edges 32T0 apart
-    uint32_t peaks[5];
-    int peak_count = 0;
-    
-    for (int i = preamble_start + 1; i < sample_count - 1 && peak_count < 5; i++) {
-        // Local maximum above baseline
-        if (filtered[i] > filtered[i-1] && 
-            filtered[i] > filtered[i+1] &&
-            filtered[i] > center) {
-            
-            peaks[peak_count++] = i;
-            NRF_LOG_INFO("Preamble peak %d at sample %d (~%dms)", peak_count, i, (i * 8) / 1000);
-            
-            i += 20;  // Skip ahead to avoid double-counting
-        }
-    }
-    
-    if (peak_count < 5) {
-        NRF_LOG_INFO("Preamble not found (only %d peaks detected)", peak_count);
-        free(filtered);
-        return 0;
-    }
-    
-    // Step 5: Calculate τ = (fifth peak - first peak) / 4
-    // This gives us the time between two edges that the tag is broadcasting
-    // Tag's actual clock period (handles frequency variations!)
-    uint32_t total_samples = peaks[4] - peaks[0];
-    uint32_t total_time_us = total_samples * 8;  // Convert samples to µs
-    uint16_t tau = total_time_us / 4;  // Time between edges (bit period)
-    uint16_t half_tau = tau / 2;
-    
-    NRF_LOG_INFO("Clock recovery: τ=%dµs (from %d samples over 4 periods)", tau, total_samples);
-    
-    // Step 6: Synchronous Manchester sampling
-    // Sample at first_peak + τ/2, then every τ for 32 bits
-    // Compare sample at T with sample at T + τ/2 for Manchester decode
-    uint32_t sample_time_us = (peaks[0] * 8) + half_tau;
-    uint32_t uid = 0;
-    int bits_decoded = 0;
-    
-    NRF_LOG_INFO("Starting synchronous sampling from %dµs", sample_time_us);
-    
-    for (int bit = 0; bit < 32; bit++) {
-        // Sample at T (beginning of bit period)
-        uint32_t t1_idx = sample_time_us / 8;
-        if (t1_idx >= sample_count - 1) break;
-        uint16_t val1 = filtered[t1_idx];
-        
-        // Sample at T + τ/2 (middle of bit period)
-        uint32_t t2_idx = (sample_time_us + half_tau) / 8;
-        if (t2_idx >= sample_count - 1) break;
-        uint16_t val2 = filtered[t2_idx];
-        
-        // Manchester decode using derivative: y[n] - y[n-1]
-        // If derivative < 0 (falling edge), bit = 1
-        // If derivative > 0 (rising edge), bit = 0
-        int16_t derivative = (int16_t)val2 - (int16_t)val1;
-        
-        if (derivative < 0) {
-            // Falling edge = bit 1
-            uid |= (1 << bit);
-        }
-        // else: Rising edge = bit 0 (uid bit already 0)
-        
-        if (bit < 8) {
-            NRF_LOG_INFO("Bit %d: val1=%d val2=%d derivative=%d → %d", 
-                         bit, val1, val2, derivative, (uid >> bit) & 1);
-        }
-        
-        bits_decoded++;
-        sample_time_us += tau;  // Move to next bit period
-    }
-    
-    // Store UID in intervals array (compatibility with existing code structure)
-    if (bits_decoded == 32) {
-        // Store as 32-bit value in first 4 interval slots
-        intervals[0] = uid & 0xFFFF;
-        intervals[1] = (uid >> 16) & 0xFFFF;
-        NRF_LOG_INFO("Decoded 32-bit UID: 0x%08lX", uid);
-        free(filtered);
-        return 32;  // Return bit count
-    }
-    
-    NRF_LOG_INFO("Incomplete decode: only %d bits", bits_decoded);
-    free(filtered);
-    return 0;
-}
 
 /**
  * Timeslot callback for time-critical BPLM transmission
@@ -375,35 +188,177 @@ static void hitag2_timeslot_callback(void) {
 
 
 /**
- * Universal Translator: Maps real-world µs to decoder's expected microseconds
- * 
- * The Hitag2 decoder (hitag.c) expects microsecond timing values:
- * - SHORT (Period 0): 128µs target (accepts 64-192µs)
- * - LONG (Period 2): 256µs target (accepts 192-320µs)
- * 
- * Our Paxton tags send RF/32 timing (faster than standard RF/50):
- * - Real Short: ~96-168µs (widened to capture jittery edges)
- * - Real Long: ~200-380µs (extended for slow responses)
- * 
- * This translator normalizes tag timing to standard decoder expectations.
+ * Helper: Calculate variance for quiet zone detection
  */
-static uint8_t translate_interval(uint16_t real_us) {
-    // Real Short (60-180µs) → Decoder Short (128µs)
-    // REDESIGN: Fixed boundary gap (was <=185 then >185, created no-man's-land at 186-191µs)
-    // Clean boundaries: 60-180 SHORT, 181-380 LONG
-    if (real_us >= 60 && real_us < 181) {
-        return 128;  // HITAG_T_SHORT - decoder recognizes as period 0
+static uint32_t calculate_variance(uint16_t *samples, int start, int window_size) {
+    uint32_t mean = 0;
+    for (int i = 0; i < window_size; i++) {
+        mean += samples[start + i];
+    }
+    mean /= window_size;
+    
+    uint32_t variance = 0;
+    for (int i = 0; i < window_size; i++) {
+        int32_t diff = (int32_t)samples[start + i] - (int32_t)mean;
+        variance += diff * diff;
+    }
+    return variance / window_size;
+}
+
+/**
+ * Synchronous Phase-Sampling Decoder for Hitag2
+ * 
+ * Mathematical approach using preamble-based clock recovery:
+ * 1. Find quiet zone (variance-based)
+ * 2. Find 5 preamble peaks (11111 sync)
+ * 3. Calculate τ = (P₅ - P₁) / 4 (bit period)
+ * 4. Start sampling at P₁ + 5.5×τ (data alignment)
+ * 5. Sample 32 bits using phase comparison
+ * 
+ * Returns: true if UID decoded, false otherwise
+ */
+static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *data) {
+    int start_idx = 200;  // Skip only initial TX noise
+    
+    if (sample_count < 5000) {
+        NRF_LOG_ERROR("Not enough samples for sync decode");
+        return false;
     }
     
-    // Real Long (181-380µs) → Decoder Long (200µs)
-    // REDESIGN: Start at 181 (not 186) to eliminate gap
-    // Safely > 192 threshold, decoder recognizes as period 2
-    if (real_us >= 181 && real_us <= 380) {
-        return 200;  // Safely > 192 threshold, decoder recognizes as period 2
+    NRF_LOG_INFO("Synchronous Phase-Sampling decoder with clock recovery");
+    
+    // Step 1: Apply low-pass filter y[n] = (x[n] + x[n-1]) / 2
+    uint16_t *filtered = (uint16_t *)malloc(sample_count * sizeof(uint16_t));
+    if (!filtered) {
+        NRF_LOG_ERROR("Failed to allocate filter buffer");
+        return false;
     }
     
-    // Noise/glitches outside expected ranges
-    return 0;
+    filtered[start_idx] = samples[start_idx];
+    for (int i = start_idx + 1; i < sample_count; i++) {
+        filtered[i] = (samples[i] + samples[i-1]) / 2;
+    }
+    
+    // Step 2: Find quiet zone (low variance = stable carrier)
+    #define QUIET_WINDOW 100
+    #define QUIET_THRESHOLD 200
+    
+    int quiet_zone_end = start_idx;
+    for (int i = start_idx; i < sample_count - QUIET_WINDOW; i += 50) {
+        uint32_t variance = calculate_variance(filtered, i, QUIET_WINDOW);
+        if (variance < QUIET_THRESHOLD) {
+            quiet_zone_end = i + QUIET_WINDOW;
+            NRF_LOG_INFO("Quiet zone ending at sample %d (~%dms)", 
+                        quiet_zone_end, (quiet_zone_end * 8) / 1000);
+            break;
+        }
+    }
+    
+    // Step 3: Find modulation start (high variance = tag responding)
+    int preamble_start = quiet_zone_end;
+    for (int i = quiet_zone_end; i < sample_count - QUIET_WINDOW; i += 10) {
+        uint32_t variance = calculate_variance(filtered, i, QUIET_WINDOW);
+        if (variance > QUIET_THRESHOLD * 3) {
+            preamble_start = i;
+            NRF_LOG_INFO("Modulation start at sample %d (~%dms)", 
+                        preamble_start, (preamble_start * 8) / 1000);
+            break;
+        }
+    }
+    
+    // Step 4: Find 5 preamble peaks (11111 sync pattern)
+    uint16_t global_min = 4095, global_max = 0;
+    for (int i = preamble_start; i < sample_count && i < preamble_start + 2000; i++) {
+        if (filtered[i] < global_min) global_min = filtered[i];
+        if (filtered[i] > global_max) global_max = filtered[i];
+    }
+    uint16_t center = (global_min + global_max) / 2;
+    
+    uint32_t peaks[5];
+    int peak_count = 0;
+    
+    for (int i = preamble_start + 1; i < sample_count - 1 && peak_count < 5; i++) {
+        // Local maximum above center
+        if (filtered[i] > filtered[i-1] && 
+            filtered[i] > filtered[i+1] &&
+            filtered[i] > center) {
+            
+            peaks[peak_count] = i;
+            NRF_LOG_INFO("Preamble peak %d at sample %d", peak_count + 1, i);
+            peak_count++;
+            i += 20;  // Skip to avoid double-counting
+        }
+    }
+    
+    if (peak_count < 5) {
+        NRF_LOG_ERROR("Only found %d peaks, need 5 for sync", peak_count);
+        free(filtered);
+        return false;
+    }
+    
+    // Step 5: Calculate τ (bit period) from preamble
+    // τ = (P₅ - P₁) / 4 (5 peaks = 4 bit periods)
+    uint32_t tau_samples = (peaks[4] - peaks[0]) / 4;
+    uint32_t tau_us = tau_samples * 8;
+    
+    NRF_LOG_INFO("Clock recovery: τ=%d samples (%dµs)", tau_samples, tau_us);
+    
+    // Validate τ is reasonable (200-450µs for Hitag2)
+    if (tau_us < 200 || tau_us > 450) {
+        NRF_LOG_ERROR("τ out of range: %dµs (expect 200-450µs)", tau_us);
+        free(filtered);
+        return false;
+    }
+    
+    // Step 6: Calculate data start (5.5 bit periods after first peak)
+    // 5 preamble bits + 0.5 to center in first data bit
+    uint32_t data_start_sample = peaks[0] + (tau_samples * 11 / 2);  // 5.5 × τ
+    
+    NRF_LOG_INFO("Data start at sample %d (P1=%d + 5.5×τ)", 
+                data_start_sample, peaks[0]);
+    
+    if (data_start_sample + (32 * tau_samples) >= sample_count) {
+        NRF_LOG_ERROR("Data extends beyond buffer");
+        free(filtered);
+        return false;
+    }
+    
+    // Step 7: Phase-based sampling (32 bits)
+    uint32_t uid = 0;
+    
+    for (int bit = 0; bit < 32; bit++) {
+        uint32_t t_start = data_start_sample + (bit * tau_samples);
+        uint32_t t_mid = t_start + (tau_samples / 2);
+        
+        if (t_mid >= sample_count) {
+            NRF_LOG_ERROR("Bit %d sampling beyond buffer", bit);
+            free(filtered);
+            return false;
+        }
+        
+        uint16_t v_start = filtered[t_start];
+        uint16_t v_mid = filtered[t_mid];
+        
+        // Derivative-based edge detection: v_mid < v_start = falling = 1
+        if (v_mid < v_start) {
+            uid |= (1 << bit);
+        }
+        
+        // Debug logging for first few bits
+        if (bit < 8) {
+            int16_t derivative = (int16_t)v_mid - (int16_t)v_start;
+            NRF_LOG_INFO("Bit %d: V_start=%d V_mid=%d derivative=%d → %d", 
+                        bit, v_start, v_mid, derivative, (v_mid < v_start) ? 1 : 0);
+        }
+    }
+    
+    NRF_LOG_INFO("Decoded 32-bit UID: 0x%08X", uid);
+    
+    // Copy UID to output
+    memcpy(data, &uid, 4);
+    
+    free(filtered);
+    return true;
 }
 
 /**
@@ -422,20 +377,12 @@ static uint8_t translate_interval(uint16_t real_us) {
  * - ChameleonUltra HID for SAADC sampling
  */
 bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
-    NRF_LOG_INFO("Hitag2 START_AUTH with SAADC sampling + edge detection");
-    
-    // Allocate codec for Manchester decoding (tag response)
-    void *codec = hitag2.alloc();
-    if (codec == NULL) {
-        NRF_LOG_ERROR("Failed to allocate Hitag2 codec");
-        return false;
-    }
-    hitag2.decoder.start(codec, 0);
+    NRF_LOG_INFO("Hitag2 START_AUTH with Synchronous Phase-Sampling decoder");
     
     // Initialize circular buffer for SAADC samples
     cb_init(&cb, HITAG2_BUFFER_SIZE, sizeof(uint16_t));
     
-    // Initialize SAADC for analog sampling (like HID)
+    // Initialize SAADC for analog sampling
     init_hitag2_hw();
     
     // Request timeslot for transmission
@@ -443,135 +390,48 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     
     NRF_LOG_INFO("START_AUTH transmitted, collecting SAADC samples...");
     
-    // Use larger static array to hold full response
-    // DOUBLED: 16384 samples = 131ms at 125kHz (was 8192 = 65ms)
-    // CRITICAL: Need full buffer to capture complete 32-bit UID + CRC
-    // Static to avoid stack overflow (32KB is too large for stack)
+    // Static array to hold full response (32KB)
     static uint16_t samples[16384];
     int sample_count = 0;
     
-    // Continuous drain loop: actively drain buffer for 80ms (matches timeslot)
-    // ALIGNED: Matches hardware timeslot duration for consistent timing
-    // This prevents circular buffer overflow and captures complete tag response
-    autotimer *p_at = bsp_obtain_timer(0);  // Obtain timer with 0 initial value
+    // Collect samples for 80ms (matches timeslot)
+    autotimer *p_at = bsp_obtain_timer(0);
     
     while (NO_TIMEOUT_1MS(p_at, 80) && sample_count < 16384) {
         uint16_t val;
-        // Drain all available samples from circular buffer
         while (cb_pop_front(&cb, &val) && sample_count < 16384) {
             samples[sample_count++] = val;
         }
-        // Brief yield to allow SAADC interrupt to fire
         bsp_delay_us(100);
     }
     
-    bsp_return_timer(p_at);  // Return timer to pool
+    bsp_return_timer(p_at);
     
     NRF_LOG_INFO("Collected %d SAADC samples", sample_count);
     
-    // Check if we got any samples at all
+    // Check if we got samples
     if (sample_count == 0) {
-        NRF_LOG_ERROR("No SAADC samples collected - SAADC may not be running!");
-        NRF_LOG_ERROR("Check that lf_125khz_radio_saadc_enable() was called");
+        NRF_LOG_ERROR("No SAADC samples collected!");
         stop_lf_125khz_radio();
         uninit_hitag2_hw();
         cb_free(&cb);
-        hitag2.free(codec);
         return false;
     }
     
-    NRF_LOG_INFO("Detecting edges from %d samples...", sample_count);
+    // Call synchronous phase-sampling decoder
+    bool success = hitag2_sync_decode(samples, sample_count, data);
     
-    // Detect edges and get intervals
-    uint16_t intervals[128];
-    int edge_count = hitag2_detect_edges_from_saadc(samples, sample_count, intervals, 128);
-    
-    if (edge_count == 0) {
-        NRF_LOG_WARNING("No edges detected from samples - check signal levels");
-        stop_lf_125khz_radio();
-        uninit_hitag2_hw();
-        cb_free(&cb);
-        hitag2.free(codec);
-        return false;
-    }
-    
-    // SOF Detection: Scan for 5 consecutive short intervals (80-185µs)
-    // RELAXED: Was 80-160µs, now 80-185µs to capture timing jitter
-    // This identifies the 11111 SOF header with wider tolerance
-    int sof_start = -1;
-    for (int i = 0; i < edge_count - 5; i++) {
-        int consecutive_short = 0;
-        for (int j = 0; j < 5; j++) {
-            if (intervals[i+j] >= 80 && intervals[i+j] <= 185) {
-                consecutive_short++;
-            }
-        }
-        if (consecutive_short >= 5) {
-            sof_start = i;
-            NRF_LOG_INFO("SOF detected at index %d (5+ consecutive 80-185µs intervals)", sof_start);
-            break;
-        }
-    }
-    
-    // Determine start position for decoder
-    int decode_start = (sof_start >= 0) ? sof_start : 0;
-    if (sof_start >= 0) {
-        NRF_LOG_INFO("Starting decode from SOF at index %d (%d intervals to process)", 
-                    sof_start, edge_count - sof_start);
-        
-        // DIAGNOSTIC: Log first 10 intervals with translations
-        NRF_LOG_INFO("First intervals (raw → translated):");
-        for (int i = sof_start; i < edge_count && i < sof_start + 10; i++) {
-            uint8_t translated = translate_interval(intervals[i]);
-            NRF_LOG_INFO("  INT[%d]: %dµs → %d", i - sof_start, intervals[i], translated);
-        }
-    } else {
-        NRF_LOG_WARNING("No SOF detected - starting from beginning (may fail)");
-        NRF_LOG_INFO("Feeding all %d intervals to decoder", edge_count);
-    }
-    
-    // Feed intervals to Manchester decoder with sliding window retry
-    // Use Universal Translator to convert real µs to decoder's magic numbers
-    // Try offsets 0, 1, 2, 3 from SOF to handle extra noise edges
-    bool ok = false;
-    
-    // Sliding window: Try 4 different starting positions
-    for (int offset = 0; offset < 4 && !ok && decode_start + offset < edge_count; offset++) {
-        int start_pos = decode_start + offset;
-        NRF_LOG_INFO("Trying offset %d: decode from index %d", offset, start_pos);
-        
-        hitag2.decoder.start(codec, 0);  // Reset decoder state
-        for (int i = start_pos; i < edge_count; i++) {
-            uint16_t raw_interval = intervals[i];
-            
-            // Translate real-world µs to decoder's expected values (48, 112)
-            // This bridges the gap between RF/32 (Paxton) and RF/50 (decoder expects)
-            uint8_t translated_interval = translate_interval(raw_interval);
-            
-            // Feed translated interval to decoder
-            if (hitag2.decoder.feed(codec, translated_interval)) {
-                memcpy(data, hitag2.get_data(codec), hitag2.data_size);
-                ok = true;
-                NRF_LOG_INFO("Offset %d SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
-                            offset, data[0], data[1], data[2], data[3]);
-                break;
-            }
-        }
-        
-        if (!ok && offset < 3) {
-            NRF_LOG_INFO("Offset %d failed, trying next offset...", offset);
-        }
-    }
-    
+    // Cleanup
     stop_lf_125khz_radio();
     uninit_hitag2_hw();
     cb_free(&cb);
-    hitag2.free(codec);
     
-    if (!ok) {
-        NRF_LOG_INFO("Hitag2 tag not found - %d edges detected but decode failed", edge_count);
-        NRF_LOG_INFO("Try adjusting tag position or check Manchester thresholds");
+    if (success) {
+        NRF_LOG_INFO("SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
+                    data[0], data[1], data[2], data[3]);
+    } else {
+        NRF_LOG_ERROR("Synchronous decoding failed");
     }
     
-    return ok;
+    return success;
 }
