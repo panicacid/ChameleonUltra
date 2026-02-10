@@ -167,135 +167,127 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     //   - Power-up transients (2.5ms)
     //   - START_AUTH transmission (~1ms)
     //   - TX->RX wait period (5ms)
-    // This ensures we analyze only the tag's response, not reader noise
-    int start_idx = 1200;
+    // SYNCHRONOUS MANCHESTER DECODER WITH PREAMBLE CLOCK RECOVERY
+    // Based on expert advice: Use 11111 preamble to recover tag's clock
+    // T0 = carrier period (1/125kHz), but frequency may vary - use sync to measure!
     
-    // Safety check: ensure buffer is large enough
-    if (sample_count < start_idx + 100) {
-        NRF_LOG_WARNING("Buffer too small for post-TX analysis (need %d+, got %d)", 
-                        start_idx + 100, sample_count);
+    int start_idx = 1200;  // Skip ~10ms muzzle flash
+    
+    if (sample_count < start_idx + 5000) {
+        NRF_LOG_INFO("Not enough samples for preamble detection");
         return 0;
     }
     
-    NRF_LOG_INFO("Using POST-TX region: samples %d-%d (skipped %dms muzzle flash)",
-                 start_idx, sample_count, (start_idx * 8) / 1000);
+    NRF_LOG_INFO("Synchronous Manchester decoder with preamble clock recovery");
     
-    // Calculate AVERAGE threshold on POST-TX region (statistical robustness)
-    // Track min/max for squelch, sum for average
+    // Step 1: Apply low-pass filter y[n] = (x[n] + x[n-1]) / 2
+    // This smooths noise while preserving signal structure
+    uint16_t *filtered = (uint16_t *)malloc(sample_count * sizeof(uint16_t));
+    if (!filtered) {
+        NRF_LOG_INFO("Failed to allocate filter buffer");
+        return 0;
+    }
+    
+    filtered[start_idx] = samples[start_idx];
+    for (int i = start_idx + 1; i < sample_count; i++) {
+        filtered[i] = (samples[i] + samples[i-1]) / 2;
+    }
+    
+    // Find baseline for peak detection
     uint16_t min_sample = 4095, max_sample = 0;
-    uint32_t sum = 0;
-    int valid_samples = 0;
-    
-    for (int i = start_idx; i < sample_count; i++) {
-        uint16_t sample = samples[i];
-        
-        // Track min/max for squelch
-        if (sample < min_sample) {
-            min_sample = sample;
-        }
-        if (sample > max_sample) {
-            max_sample = sample;
-        }
-        
-        // Accumulate sum for average
-        sum += sample;
-        valid_samples++;
+    for (int i = start_idx; i < start_idx + 5000; i++) {
+        if (filtered[i] < min_sample) min_sample = filtered[i];
+        if (filtered[i] > max_sample) max_sample = filtered[i];
     }
+    uint16_t center = (min_sample + max_sample) / 2;
     
-    // SQUELCH: Check signal strength to kill ghost tags
-    // Sensitive threshold (1000) for weak/shallow modulation tags
-    uint16_t swing = max_sample - min_sample;
-    if (swing < 1000) {
-        NRF_LOG_INFO("SQUELCH: Signal too weak (swing=%d ADC) - no tag present", swing);
-        return 0;  // No edges - ghost tag killed
-    }
+    NRF_LOG_INFO("Signal baseline: center=%d, swing=%d", center, max_sample - min_sample);
     
-    // ADAPTIVE SLIDING WINDOW DETECTION
-    // Problem: Global 20% hysteresis (2593 ADC) exceeds tag backscatter depth (300-800 ADC)
-    // Solution: Use LOCAL thresholds per 1000-sample window (8ms)
-    // Tag backscatter is shallow load modulation - only 2-6% of carrier swing!
+    // Step 2: Find 5 preamble peaks (11111 sync pattern)
+    // These are falling edges 32T0 apart
+    uint32_t peaks[5];
+    int peak_count = 0;
     
-    NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV), swing=%d ADC",
-                 min_sample, (min_sample * 3300) / 4095,
-                 max_sample, (max_sample * 3300) / 4095,
-                 swing);
-    
-    #define WINDOW_SIZE 1000        // 8ms window
-    #define WINDOW_STEP 500         // 4ms step (50% overlap)
-    #define MIN_HYSTERESIS 400      // Minimum for tag backscatter
-    #define HYSTERESIS_PERCENT 5    // 5% of local swing
-    
-    NRF_LOG_INFO("Using Adaptive Sliding Window (size=%d, step=%d, min_hyst=%d ADC)", 
-                 WINDOW_SIZE, WINDOW_STEP, MIN_HYSTERESIS);
-    
-    int interval_count = 0;
-    uint32_t last_edge_idx = start_idx;
-    bool state_high = false;
-    
-    // Slide window through signal
-    for (int window_start = start_idx; 
-         window_start + WINDOW_SIZE < sample_count && interval_count < max_intervals; 
-         window_start += WINDOW_STEP) {
-        
-        // Calculate LOCAL min/max for this window only
-        uint16_t local_min = 4095, local_max = 0;
-        for (int i = window_start; i < window_start + WINDOW_SIZE; i++) {
-            if (samples[i] < local_min) local_min = samples[i];
-            if (samples[i] > local_max) local_max = samples[i];
-        }
-        
-        // LOCAL thresholds adapt to current carrier level
-        uint16_t local_center = (local_min + local_max) / 2;
-        uint16_t local_swing = local_max - local_min;
-        
-        // Hysteresis: 5% of local swing OR 400 ADC minimum (tag modulation depth)
-        uint16_t local_hysteresis = (local_swing * HYSTERESIS_PERCENT) / 100;
-        if (local_hysteresis < MIN_HYSTERESIS) {
-            local_hysteresis = MIN_HYSTERESIS;
-        }
-        
-        uint16_t high_thresh = local_center + local_hysteresis;
-        uint16_t low_thresh = local_center - local_hysteresis;
-        
-        // Initialize state for this window
-        if (window_start == start_idx) {
-            state_high = (samples[window_start] > local_center);
-        }
-        
-        // Detect edges in THIS window with LOCAL thresholds
-        for (int i = window_start; i < window_start + WINDOW_SIZE && interval_count < max_intervals; i++) {
-            bool edge_detected = false;
+    for (int i = start_idx + 1; i < sample_count - 1 && peak_count < 5; i++) {
+        // Local maximum above baseline
+        if (filtered[i] > filtered[i-1] && 
+            filtered[i] > filtered[i+1] &&
+            filtered[i] > center) {
             
-            if (!state_high && samples[i] > high_thresh) {
-                // Rising edge
-                edge_detected = true;
-                state_high = true;
-            }
-            else if (state_high && samples[i] < low_thresh) {
-                // Falling edge
-                edge_detected = true;
-                state_high = false;
-            }
+            peaks[peak_count++] = i;
+            NRF_LOG_INFO("Preamble peak %d at sample %d", peak_count, i);
             
-            if (edge_detected && i > last_edge_idx) {
-                // Calculate timing-based interval
-                uint32_t interval_samples = i - last_edge_idx;
-                uint16_t interval_us = interval_samples * 8;
-                
-                // Classify by TIME to reveal Manchester data
-                if (interval_us >= 60 && interval_us < 180) {
-                    intervals[interval_count++] = 128;  // SHORT
-                } else if (interval_us >= 180 && interval_us <= 380) {
-                    intervals[interval_count++] = 200;  // LONG
-                }
-                
-                last_edge_idx = i;
-            }
+            i += 20;  // Skip ahead to avoid double-counting
         }
     }
     
-    NRF_LOG_INFO("Detected %d edges from %d samples using Adaptive Sliding Window", interval_count, sample_count);
-    return interval_count;
+    if (peak_count < 5) {
+        NRF_LOG_INFO("Preamble not found (only %d peaks detected)", peak_count);
+        free(filtered);
+        return 0;
+    }
+    
+    // Step 3: Calculate τ = (fifth peak - first peak) / 4
+    // This gives us the time between two edges that the tag is broadcasting
+    // Tag's actual clock period (handles frequency variations!)
+    uint32_t total_samples = peaks[4] - peaks[0];
+    uint32_t total_time_us = total_samples * 8;  // Convert samples to µs
+    uint16_t tau = total_time_us / 4;  // Time between edges (bit period)
+    uint16_t half_tau = tau / 2;
+    
+    NRF_LOG_INFO("Clock recovery: τ=%dµs (from %d samples over 4 periods)", tau, total_samples);
+    
+    // Step 4: Synchronous Manchester sampling
+    // Sample at first_peak + τ/2, then every τ for 32 bits
+    // Compare sample at T with sample at T + τ/2 for Manchester decode
+    uint32_t sample_time_us = (peaks[0] * 8) + half_tau;
+    uint32_t uid = 0;
+    int bits_decoded = 0;
+    
+    NRF_LOG_INFO("Starting synchronous sampling from %dµs", sample_time_us);
+    
+    for (int bit = 0; bit < 32; bit++) {
+        // Sample at T (beginning of bit period)
+        uint32_t t1_idx = sample_time_us / 8;
+        if (t1_idx >= sample_count) break;
+        uint16_t val1 = filtered[t1_idx];
+        
+        // Sample at T + τ/2 (middle of bit period)
+        uint32_t t2_idx = (sample_time_us + half_tau) / 8;
+        if (t2_idx >= sample_count) break;
+        uint16_t val2 = filtered[t2_idx];
+        
+        // Manchester decode: High→Low = 1, Low→High = 0
+        if (val1 > center && val2 < center) {
+            // Falling transition = bit 1
+            uid |= (1 << bit);
+        } else if (val1 < center && val2 > center) {
+            // Rising transition = bit 0
+            // (uid bit already 0)
+        }
+        
+        if (bit < 8) {
+            NRF_LOG_INFO("Bit %d: val1=%d val2=%d (center=%d) → %d", 
+                         bit, val1, val2, center, (uid >> bit) & 1);
+        }
+        
+        bits_decoded++;
+        sample_time_us += tau;  // Move to next bit period
+    }
+    
+    // Store UID in intervals array (compatibility with existing code structure)
+    if (bits_decoded == 32) {
+        // Store as 32-bit value in first 4 interval slots
+        intervals[0] = uid & 0xFFFF;
+        intervals[1] = (uid >> 16) & 0xFFFF;
+        NRF_LOG_INFO("Decoded 32-bit UID: 0x%08lX", uid);
+        free(filtered);
+        return 32;  // Return bit count
+    }
+    
+    NRF_LOG_INFO("Incomplete decode: only %d bits", bits_decoded);
+    free(filtered);
+    return 0;
 }
 
 /**
