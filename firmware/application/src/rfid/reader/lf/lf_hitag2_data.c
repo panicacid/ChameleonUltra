@@ -311,6 +311,18 @@ static void hitag2_timeslot_callback(void) {
 }
 
 /**
+ * Interval Quantization Helper: Snap jittery intervals to expected Manchester timings
+ * This reduces decoder sync errors caused by LPF-induced timing variations
+ * Expected: Half-bit ~128µs, Full-bit ~256µs
+ */
+static inline uint16_t quantize_interval(uint16_t interval) {
+    if (interval < 96) return interval;      // Too short - keep as noise/glitch
+    if (interval < 192) return 128;          // Half-bit → snap to 128µs
+    if (interval < 384) return 256;          // Full-bit → snap to 256µs
+    return interval;                         // Long intervals - keep as-is
+}
+
+/**
  * Attempt to read Hitag2 tag UID using RTF protocol
  * 
  * Protocol flow adapted for ChameleonUltra hardware:
@@ -453,17 +465,6 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         NRF_LOG_INFO("Clock Normalization: SOF_avg=%d.%dµs, Scale=%d.%03d", 
                      avg_sof_int/10, avg_sof_int%10, 
                      scale_int/1000, scale_int%1000);
-    }
-    
-    // Interval Quantization Helper: Snap jittery intervals to expected Manchester timings
-    // This reduces decoder sync errors caused by LPF-induced timing variations
-    // Expected: Half-bit ~128µs, Full-bit ~256µs
-    // Using inline helper function for C compatibility (no C++ lambdas)
-    static inline uint16_t quantize_interval(uint16_t interval) {
-        if (interval < 96) return interval;      // Too short - keep as noise/glitch
-        if (interval < 192) return 128;          // Half-bit → snap to 128µs
-        if (interval < 384) return 256;          // Full-bit → snap to 256µs
-        return interval;                         // Long intervals - keep as-is
     }
     
     // Feed intervals to Manchester decoder with sliding window retry
