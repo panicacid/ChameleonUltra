@@ -130,17 +130,9 @@ static void hitag2_send_start_auth(void) {
         hitag2_send_bit(bit);
     }
     
-    // CRITICAL: Add terminating pulse to mark end of bit 5
-    // Each BPLM bit is defined by [falling edge] → OFF → ON → [next falling edge]
-    // Bit 5 needs a terminating falling edge to mark its end
-    // Without this, scope only sees 4 complete bits (1100 instead of 11000)
-    NRF_LOG_INFO("Adding terminating pulse to mark end of bit 5");
-    stop_lf_125khz_radio();
-    bsp_delay_us(HITAG2_BPLM_PULSE_US);  // 69µs pulse (same as bits)
-    start_lf_125khz_radio();
-    
-    // Field is now ON for tag to receive power and respond
-    NRF_LOG_INFO("Field ON for tag response");
+    // Field stays ON continuously after last bit
+    // Tag will see complete command and respond with full UID
+    // Terminating pulse removed - was causing tag to reset/truncate response
     
     NRF_LOG_INFO("START_AUTH transmission complete - sent %d bits", HITAG2_START_AUTH_BITS);
 }
