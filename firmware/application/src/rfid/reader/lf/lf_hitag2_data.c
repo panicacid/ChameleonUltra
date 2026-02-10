@@ -210,74 +210,84 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
         return 0;  // No edges - ghost tag killed
     }
     
-    // SOFTWARE SCHMITT TRIGGER (Hysteresis Comparator)
-    // Emulates hardware comparator used in RFIDler
-    // More robust to gentle LPF-filtered edges than derivative detection
+    // PEAK-AMPLITUDE DETECTION (LPF-Aware)
+    // Key insight: LPF charging time means taller peaks = wider original pulses
+    // Short pulse (128µs): Charges to ~60% → Peak ~8000 ADC
+    // Long pulse (256µs): Charges to ~90% → Peak ~12000 ADC
+    // Use peak amplitude to infer original pulse width!
     
-    // Step A: Calculate center threshold
-    uint16_t center = (min_sample + max_sample) / 2;
-    
-    // Step B: Define hysteresis (2.5% noise margin - MAXIMUM sensitivity)
-    // REDESIGN: Doubled sensitivity (was /20 = 5%, now /40 = 2.5%)
-    // More sensitive to weak/fading edges at end of tag transmission
-    // Risk: More noise, but SOF filter handles false positives
-    uint16_t hysteresis = (max_sample - min_sample) / 40;
-    uint16_t high_thresh = center + hysteresis;
-    uint16_t low_thresh = center - hysteresis;
+    uint16_t baseline = (min_sample + max_sample) / 2;
     
     NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV), swing=%d ADC",
                  min_sample, (min_sample * 3300) / 4095,
                  max_sample, (max_sample * 3300) / 4095,
                  swing);
-    NRF_LOG_INFO("Schmitt Trigger: center=%d, high_thresh=%d, low_thresh=%d, hysteresis=%d ADC",
-                 center, high_thresh, low_thresh, hysteresis);
+    NRF_LOG_INFO("Peak-Amplitude Detection: baseline=%d, using peak heights for width inference", baseline);
     
-    // Step C: State machine with hysteresis
-    // Initialize state based on first post-TX sample
-    bool state_high = (samples[start_idx] > center);
-    int last_edge_index = start_idx;
+    // Find peaks and valleys with simple derivative
     int interval_count = 0;
+    bool rising = false;
+    uint16_t last_sample = samples[start_idx];
+    uint16_t peak_value = 0;
+    uint16_t valley_value = 0;
+    int peak_index = start_idx;
+    int valley_index = start_idx;
+    bool have_valley = false;
     
-    NRF_LOG_INFO("Using Software Schmitt Trigger edge detection");
+    NRF_LOG_INFO("Using Peak-Amplitude edge detection (LPF-aware)");
     
     for (int i = start_idx + 1; i < sample_count && interval_count < max_intervals; i++) {
         uint16_t sample = samples[i];
-        bool edge_detected = false;
         
-        if (!state_high && sample > high_thresh) {
-            // RISING EDGE: Signal crossed high threshold while in LOW state
-            edge_detected = true;
-            state_high = true;
-        } else if (state_high && sample < low_thresh) {
-            // FALLING EDGE: Signal crossed low threshold while in HIGH state
-            edge_detected = true;
-            state_high = false;
-        }
-        
-        if (edge_detected) {
-            // Calculate interval in sample units
-            int sample_interval = i - last_edge_index;
+        // Detect direction change (peak or valley)
+        if (rising && sample < last_sample) {
+            // Was rising, now falling → PEAK found
+            peak_value = last_sample;
+            peak_index = i - 1;
             
-            // Convert to microseconds (SAADC at 125kHz = 8µs per sample)
-            const uint8_t MICROSECONDS_PER_SAMPLE = 8;
-            uint16_t interval_us = sample_interval * MICROSECONDS_PER_SAMPLE;
-            
-            // Filter noise and field stabilization
-            if (interval_us < 20) {
-                // Skip very short glitches
-                last_edge_index = i;
-            } else if (interval_count == 0 && interval_us > 1000) {
-                // Skip field stabilization (first long edge)
-                last_edge_index = i;
-            } else {
-                // Store valid interval
-                intervals[interval_count++] = interval_us;
-                last_edge_index = i;
+            // Calculate amplitude from valley to peak
+            if (have_valley) {
+                uint16_t amplitude = peak_value - valley_value;
+                int time_interval = (peak_index - valley_index) * 8;  // µs
+                
+                // Infer original pulse width from amplitude (LPF compensation)
+                uint16_t inferred_width;
+                if (amplitude > 6000) {
+                    // Tall peak → LONG pulse (had time to charge)
+                    inferred_width = 200;  // Map to decoder LONG
+                } else if (amplitude > 2500) {
+                    // Medium peak → SHORT pulse
+                    inferred_width = 128;  // Map to decoder SHORT
+                } else {
+                    // Small peak → noise
+                    inferred_width = 0;
+                }
+                
+                // Record if valid
+                if (inferred_width > 0 && time_interval > 20 && time_interval < 2000) {
+                    // Skip first interval if too long (field artifact)
+                    if (interval_count == 0 && time_interval > 1000) {
+                        // Skip
+                    } else {
+                        intervals[interval_count++] = inferred_width;
+                    }
+                }
             }
+            
+            rising = false;
+        } 
+        else if (!rising && sample > last_sample) {
+            // Was falling, now rising → VALLEY found
+            valley_value = last_sample;
+            valley_index = i - 1;
+            have_valley = true;
+            rising = true;
         }
+        
+        last_sample = sample;
     }
     
-    NRF_LOG_INFO("Detected %d edges from %d samples using Schmitt Trigger", interval_count, sample_count);
+    NRF_LOG_INFO("Detected %d edges from %d samples using Peak-Amplitude detection", interval_count, sample_count);
     return interval_count;
 }
 
