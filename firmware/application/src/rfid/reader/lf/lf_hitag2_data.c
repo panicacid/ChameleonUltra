@@ -310,17 +310,6 @@ static void hitag2_timeslot_callback(void) {
     NRF_LOG_INFO("START_AUTH transmitted, field ON for response");
 }
 
-/**
- * Interval Quantization Helper: Snap jittery intervals to expected Manchester timings
- * This reduces decoder sync errors caused by LPF-induced timing variations
- * Expected: Half-bit ~128µs, Full-bit ~256µs
- */
-static inline uint16_t quantize_interval(uint16_t interval) {
-    if (interval < 96) return interval;      // Too short - keep as noise/glitch
-    if (interval < 192) return 128;          // Half-bit → snap to 128µs
-    if (interval < 384) return 256;          // Full-bit → snap to 256µs
-    return interval;                         // Long intervals - keep as-is
-}
 
 /**
  * Attempt to read Hitag2 tag UID using RTF protocol
@@ -481,13 +470,11 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
             uint16_t raw_interval = intervals[i];
             
             // Apply clock normalization to compensate for timing jitter
+            // Feed normalized intervals directly - no quantization
+            // Quantization was destroying timing information decoder needs
             uint16_t normalized_interval = (uint16_t)((float)raw_interval * scale);
             
-            // Apply quantization to snap to expected Manchester timings
-            // This cleans up LPF-induced timing variations (96-160µs → 128µs, etc.)
-            uint16_t quantized_interval = quantize_interval(normalized_interval);
-            
-            if (hitag2.decoder.feed(codec, quantized_interval)) {
+            if (hitag2.decoder.feed(codec, normalized_interval)) {
                 memcpy(data, hitag2.get_data(codec), hitag2.data_size);
                 ok = true;
                 NRF_LOG_INFO("Offset %d SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 

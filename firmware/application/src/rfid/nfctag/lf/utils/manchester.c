@@ -7,7 +7,7 @@ void manchester_reset(manchester *m) {
     m->sync = true;
 }
 
-void manchester_feed(manchester *m, uint8_t interval, bool *bits, int8_t *bitlen) {
+void manchester_feed(manchester *m, uint16_t interval, bool *bits, int8_t *bitlen) {
     // after the current interval is processed, is it on the judgment line
     uint8_t t = m->rp(interval);
     *bitlen = -1;

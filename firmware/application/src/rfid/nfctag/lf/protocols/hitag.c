@@ -36,12 +36,16 @@ NRF_LOG_MODULE_REGISTER();
 #define HITAG_PWM_COUNTER_TOP 50     // RF/50 timing
 #define HITAG_PWM_POLARITY_BIT (1 << 15)  // MSB for polarity
 
-// Period detection thresholds for Manchester demodulation at RF/50
-// RELAXED: Lower thresholds for weak tag responses
-// User reports tag responding but receiver not detecting - need more tolerance
-#define HITAG_T_LOW 0x30      // Was 0x40 - lowered for weak signals
-#define HITAG_T_HIGH 0x70     // Was 0x60 - increased range  
-#define HITAG_T_JITTER 0x20   // Was 0x10 - doubled tolerance
+// Period detection thresholds for Manchester demodulation
+// UPDATED: Thresholds based on real-world Paxton tag data
+// Our intervals after clock normalization: ~97-154µs (short), ~200-316µs (long)
+#define HITAG_T_SHORT 128     // Target for half-bit (short interval)
+#define HITAG_T_LONG 256      // Target for full-bit (long interval)
+#define HITAG_T_TOLERANCE 64  // ±64µs tolerance (50% of short interval)
+
+// Ranges: 
+// Short: 128 ± 64 = 64-192µs
+// Long:  256 ± 64 = 192-320µs
 
 // PWM sequence storage for Hitag2
 static nrf_pwm_values_wave_form_t m_hitag2_pwm_seq_vals[HITAG_RAW_SIZE] = {};
@@ -106,22 +110,37 @@ bool hitag2_decode_biplm_bit(hitag_codec *d, uint8_t half_bit) {
     }
 }
 
-// Period detection for Manchester demodulation at RF/50
-uint8_t hitag2_period(uint8_t interval) {
-    // Simplified period detection for Hitag2
-    // T0 = 8us, RF/50 means 50 RF cycles per bit
-    // RELAXED thresholds to capture weak tag responses
+// Period detection for Manchester demodulation
+// Accepts uint16_t intervals (0-65535) to handle real-world timing
+uint8_t hitag2_period(uint16_t interval) {
+    // Manchester encoding timing for Hitag2:
+    // - Short interval (~128µs): half-bit period (T)
+    // - Long interval (~256µs): full-bit period (2T)
+    // - Very long interval (~384µs): 1.5-bit period (3T/2)
     
-    NRF_LOG_DEBUG("Period detect: interval=%d (0x%02X)", interval, interval);
+    NRF_LOG_DEBUG("Period detect: interval=%d µs", interval);
     
-    if (interval >= (HITAG_T_LOW - HITAG_T_JITTER) && interval <= (HITAG_T_LOW + HITAG_T_JITTER)) {
-        NRF_LOG_DEBUG("  -> T_LOW (period 0)");
+    // Short interval: 64-192µs → period 0 (1T)
+    if (interval >= (HITAG_T_SHORT - HITAG_T_TOLERANCE) && 
+        interval < (HITAG_T_SHORT + HITAG_T_TOLERANCE)) {
+        NRF_LOG_DEBUG("  -> SHORT/1T (period 0)");
         return 0;
     }
-    if (interval >= (HITAG_T_HIGH - HITAG_T_JITTER) && interval <= (HITAG_T_HIGH + HITAG_T_JITTER)) {
-        NRF_LOG_DEBUG("  -> T_HIGH (period 1)");
+    
+    // Long interval: 192-320µs → period 2 (2T)
+    if (interval >= (HITAG_T_LONG - HITAG_T_TOLERANCE) && 
+        interval <= (HITAG_T_LONG + HITAG_T_TOLERANCE)) {
+        NRF_LOG_DEBUG("  -> LONG/2T (period 2)");
+        return 2;
+    }
+    
+    // Very long interval: 320-448µs → period 1 (1.5T)
+    if (interval > (HITAG_T_LONG + HITAG_T_TOLERANCE) && 
+        interval < (HITAG_T_LONG + HITAG_T_LONG)) {
+        NRF_LOG_DEBUG("  -> VERY_LONG/1.5T (period 1)");
         return 1;
     }
+    
     NRF_LOG_DEBUG("  -> INVALID (period 3)");
     return 3;  // Invalid period
 }
@@ -185,13 +204,13 @@ bool hitag2_decoder_feed(hitag_codec *d, uint16_t interval) {
     // Decode Manchester-encoded tag response (upstream)
     // Tag responds in Manchester encoding after START_AUTH
     
-    NRF_LOG_DEBUG("Decoder feed: interval=%d (0x%04X)", interval, interval);
+    NRF_LOG_DEBUG("Decoder feed: interval=%d µs", interval);
     
     bool bits[2] = {0};
     int8_t bitlen = 0;
     
-    // Feed interval to Manchester decoder
-    manchester_feed(d->modem, (uint8_t)interval, bits, &bitlen);
+    // Feed interval to Manchester decoder (now accepts uint16_t directly)
+    manchester_feed(d->modem, interval, bits, &bitlen);
     
     if (bitlen == -1) {
         NRF_LOG_DEBUG("  -> Manchester decode failed, resetting");
