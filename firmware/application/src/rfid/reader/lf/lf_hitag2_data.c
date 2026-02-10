@@ -458,12 +458,13 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     // Interval Quantization Helper: Snap jittery intervals to expected Manchester timings
     // This reduces decoder sync errors caused by LPF-induced timing variations
     // Expected: Half-bit ~128µs, Full-bit ~256µs
-    auto quantize_interval = [](uint16_t interval) -> uint16_t {
+    // Using inline helper function for C compatibility (no C++ lambdas)
+    static inline uint16_t quantize_interval(uint16_t interval) {
         if (interval < 96) return interval;      // Too short - keep as noise/glitch
         if (interval < 192) return 128;          // Half-bit → snap to 128µs
         if (interval < 384) return 256;          // Full-bit → snap to 256µs
         return interval;                         // Long intervals - keep as-is
-    };
+    }
     
     // Feed intervals to Manchester decoder with sliding window retry
     // Try offsets 0, 1, 2, 3 from SOF to handle extra noise edges
