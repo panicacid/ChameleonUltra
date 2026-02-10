@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef uint8_t (*period)(uint16_t interval);
+typedef uint8_t (*period)(uint8_t interval);
 
 typedef struct {
     bool sync;
@@ -12,4 +12,4 @@ typedef struct {
 } manchester;
 
 extern void manchester_reset(manchester *m);
-extern void manchester_feed(manchester *m, uint16_t interval, bool *bits, int8_t *bitlen);
+extern void manchester_feed(manchester *m, uint8_t interval, bool *bits, int8_t *bitlen);

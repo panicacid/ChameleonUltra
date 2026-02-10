@@ -111,8 +111,7 @@ bool hitag2_decode_biplm_bit(hitag_codec *d, uint8_t half_bit) {
 }
 
 // Period detection for Manchester demodulation
-// Accepts uint16_t intervals (0-65535) to handle real-world timing
-uint8_t hitag2_period(uint16_t interval) {
+uint8_t hitag2_period(uint8_t interval) {
     // Manchester encoding timing for Hitag2:
     // - Short interval (~128µs): half-bit period (T)
     // - Long interval (~256µs): full-bit period (2T)
@@ -200,7 +199,7 @@ bool hitag2_decode_feed(hitag_codec *d, bool bit) {
     return d->raw_length >= 32;
 }
 
-bool hitag2_decoder_feed(hitag_codec *d, uint16_t interval) {
+bool hitag2_decoder_feed(hitag_codec *d, uint8_t interval) {
     // Decode Manchester-encoded tag response (upstream)
     // Tag responds in Manchester encoding after START_AUTH
     
