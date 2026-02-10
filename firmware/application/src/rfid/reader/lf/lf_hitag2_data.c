@@ -214,9 +214,10 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     // Step A: Calculate center threshold
     uint16_t center = (min_sample + max_sample) / 2;
     
-    // Step B: Define hysteresis (10% noise margin)
-    // Prevents oscillation on noisy edges
-    uint16_t hysteresis = (max_sample - min_sample) / 10;
+    // Step B: Define hysteresis (5% noise margin - tighter for better timing)
+    // Tighter hysteresis reduces edge detection delay, improving timing accuracy
+    // Was /10 (10%), now /20 (5%) to reduce timing lag from LPF gentle slopes
+    uint16_t hysteresis = (max_sample - min_sample) / 20;
     uint16_t high_thresh = center + hysteresis;
     uint16_t low_thresh = center - hysteresis;
     
@@ -445,8 +446,24 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         }
         float avg_sof = (float)sof_sum / 5.0f;
         scale = 125.0f / avg_sof;  // Target 125µs standard timing
-        NRF_LOG_INFO("Clock Normalization: SOF_avg=%.1fµs, Scale=%.3f", avg_sof, scale);
+        
+        // Fix float logging: cast to int with precision (NRF_LOG doesn't support %f)
+        int avg_sof_int = (int)(avg_sof * 10);   // 124.8 → 1248 (tenths)
+        int scale_int = (int)(scale * 1000);     // 1.002 → 1002 (thousandths)
+        NRF_LOG_INFO("Clock Normalization: SOF_avg=%d.%dµs, Scale=%d.%03d", 
+                     avg_sof_int/10, avg_sof_int%10, 
+                     scale_int/1000, scale_int%1000);
     }
+    
+    // Interval Quantization Helper: Snap jittery intervals to expected Manchester timings
+    // This reduces decoder sync errors caused by LPF-induced timing variations
+    // Expected: Half-bit ~128µs, Full-bit ~256µs
+    auto quantize_interval = [](uint16_t interval) -> uint16_t {
+        if (interval < 96) return interval;      // Too short - keep as noise/glitch
+        if (interval < 192) return 128;          // Half-bit → snap to 128µs
+        if (interval < 384) return 256;          // Full-bit → snap to 256µs
+        return interval;                         // Long intervals - keep as-is
+    };
     
     // Feed intervals to Manchester decoder with sliding window retry
     // Try offsets 0, 1, 2, 3 from SOF to handle extra noise edges
@@ -460,10 +477,15 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         hitag2.decoder.start(codec, 0);  // Reset decoder state
         for (int i = start_pos; i < edge_count; i++) {
             uint16_t raw_interval = intervals[i];
+            
             // Apply clock normalization to compensate for timing jitter
             uint16_t normalized_interval = (uint16_t)((float)raw_interval * scale);
             
-            if (hitag2.decoder.feed(codec, normalized_interval)) {
+            // Apply quantization to snap to expected Manchester timings
+            // This cleans up LPF-induced timing variations (96-160µs → 128µs, etc.)
+            uint16_t quantized_interval = quantize_interval(normalized_interval);
+            
+            if (hitag2.decoder.feed(codec, quantized_interval)) {
                 memcpy(data, hitag2.get_data(codec), hitag2.data_size);
                 ok = true;
                 NRF_LOG_INFO("Offset %d SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
