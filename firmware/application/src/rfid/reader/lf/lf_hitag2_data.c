@@ -372,7 +372,7 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     init_hitag2_hw();
     
     // Request timeslot for transmission
-    request_timeslot(15000, hitag2_timeslot_callback);
+    request_timeslot(60000, hitag2_timeslot_callback);  // 60ms for full response
     
     NRF_LOG_INFO("START_AUTH transmitted, collecting SAADC samples...");
     
