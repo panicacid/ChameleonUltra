@@ -210,84 +210,74 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
         return 0;  // No edges - ghost tag killed
     }
     
-    // PEAK-AMPLITUDE DETECTION (LPF-Aware)
-    // Key insight: LPF charging time means taller peaks = wider original pulses
-    // Short pulse (128µs): Charges to ~60% → Peak ~8000 ADC
-    // Long pulse (256µs): Charges to ~90% → Peak ~12000 ADC
-    // Use peak amplitude to infer original pulse width!
+    // ANTI-STUTTER PEAK DETECTION with 20% Hysteresis
+    // Prevents noise ripples at peak tops from being counted as multiple edges
+    // Use TIMING between peaks (not amplitude) to classify SHORT vs LONG
     
-    uint16_t baseline = (min_sample + max_sample) / 2;
+    uint16_t hysteresis_threshold = swing / 5;  // 20% of swing
     
     NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV), swing=%d ADC",
                  min_sample, (min_sample * 3300) / 4095,
                  max_sample, (max_sample * 3300) / 4095,
                  swing);
-    NRF_LOG_INFO("Peak-Amplitude Detection: baseline=%d, using peak heights for width inference", baseline);
+    NRF_LOG_INFO("Anti-Stutter Detection: hysteresis=%d ADC (20%% swing), timing-based intervals", hysteresis_threshold);
     
-    // Find peaks and valleys with simple derivative
+    // Peak/valley detection with hysteresis state machine
     int interval_count = 0;
-    bool rising = false;
-    uint16_t last_sample = samples[start_idx];
-    uint16_t peak_value = 0;
-    uint16_t valley_value = 0;
-    int peak_index = start_idx;
-    int valley_index = start_idx;
-    bool have_valley = false;
+    bool looking_for_peak = true;  // Start looking for first peak
+    uint16_t last_peak_value = 0;
+    uint16_t last_valley_value = 0;
+    uint32_t last_peak_sample_idx = 0;
     
-    NRF_LOG_INFO("Using Peak-Amplitude edge detection (LPF-aware)");
+    NRF_LOG_INFO("Using Anti-Stutter Peak Detection with 20%% hysteresis");
     
-    for (int i = start_idx + 1; i < sample_count && interval_count < max_intervals; i++) {
+    for (int i = start_idx + 1; i < sample_count - 1 && interval_count < max_intervals; i++) {
         uint16_t sample = samples[i];
         
-        // Detect direction change (peak or valley)
-        if (rising && sample < last_sample) {
-            // Was rising, now falling → PEAK found
-            peak_value = last_sample;
-            peak_index = i - 1;
-            
-            // Calculate amplitude from valley to peak
-            if (have_valley) {
-                uint16_t amplitude = peak_value - valley_value;
-                int time_interval = (peak_index - valley_index) * 8;  // µs
-                
-                // Infer original pulse width from amplitude (LPF compensation)
-                uint16_t inferred_width;
-                if (amplitude > 6000) {
-                    // Tall peak → LONG pulse (had time to charge)
-                    inferred_width = 200;  // Map to decoder LONG
-                } else if (amplitude > 2500) {
-                    // Medium peak → SHORT pulse
-                    inferred_width = 128;  // Map to decoder SHORT
-                } else {
-                    // Small peak → noise
-                    inferred_width = 0;
-                }
-                
-                // Record if valid
-                if (inferred_width > 0 && time_interval > 20 && time_interval < 2000) {
-                    // Skip first interval if too long (field artifact)
-                    if (interval_count == 0 && time_interval > 1000) {
-                        // Skip
-                    } else {
-                        intervals[interval_count++] = inferred_width;
+        if (looking_for_peak) {
+            // Looking for PEAK (local maximum)
+            // Must be higher than neighbors
+            if (sample > samples[i-1] && sample > samples[i+1]) {
+                // Verify hysteresis: must be threshold above last valley
+                if (last_valley_value == 0 || sample > last_valley_value + hysteresis_threshold) {
+                    // Valid peak found!
+                    
+                    // Calculate TIMING-based interval
+                    if (last_peak_sample_idx > 0) {
+                        uint32_t interval_samples = i - last_peak_sample_idx;
+                        uint16_t interval_us = interval_samples * 8;
+                        
+                        // Classify by TIME (not amplitude) to reveal Manchester data
+                        if (interval_us >= 80 && interval_us < 180) {
+                            // ~125µs → SHORT
+                            intervals[interval_count++] = 128;
+                        } else if (interval_us >= 180 && interval_us <= 350) {
+                            // ~250µs → LONG
+                            intervals[interval_count++] = 200;
+                        }
+                        // Skip if outside range (noise or field artifact)
                     }
+                    
+                    last_peak_value = sample;
+                    last_peak_sample_idx = i;
+                    looking_for_peak = false;  // Now look for valley
                 }
             }
-            
-            rising = false;
-        } 
-        else if (!rising && sample > last_sample) {
-            // Was falling, now rising → VALLEY found
-            valley_value = last_sample;
-            valley_index = i - 1;
-            have_valley = true;
-            rising = true;
+        } else {
+            // Looking for VALLEY (local minimum)
+            // Must be lower than neighbors
+            if (sample < samples[i-1] && sample < samples[i+1]) {
+                // Verify hysteresis: must be threshold below last peak
+                if (sample < last_peak_value - hysteresis_threshold) {
+                    // Valid valley found!
+                    last_valley_value = sample;
+                    looking_for_peak = true;  // Now look for peak
+                }
+            }
         }
-        
-        last_sample = sample;
     }
     
-    NRF_LOG_INFO("Detected %d edges from %d samples using Peak-Amplitude detection", interval_count, sample_count);
+    NRF_LOG_INFO("Detected %d edges from %d samples using Anti-Stutter detection", interval_count, sample_count);
     return interval_count;
 }
 
