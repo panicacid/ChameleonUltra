@@ -325,11 +325,12 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
     
     NRF_LOG_INFO("Clock recovery validated: τ=%d samples (%dµs) ✓", tau_samples, tau_us);
     
-    // Step 6: Calculate data start (5.25 bit periods after first peak)
-    // 5 preamble bits + 0.25 to sample stable region (not transition at 0.5)
-    uint32_t data_start_sample = peaks[0] + (tau_samples * 21 / 4);  // 5.25 × τ
+    // Step 6: Calculate data start (5.0 bit periods after first peak)
+    // Center-to-center alignment: P1 is at phase 0.25 (HIGH center)
+    // 5 complete periods later = phase 0.25 of first data bit (HIGH center)
+    uint32_t data_start_sample = peaks[0] + (tau_samples * 5);  // 5.0 × τ
     
-    NRF_LOG_INFO("Data start at sample %d (P1=%d + 5.25×τ)", 
+    NRF_LOG_INFO("Data start at sample %d (P1=%d + 5.0×τ)", 
                 data_start_sample, peaks[0]);
     
     if (data_start_sample + (32 * tau_samples) >= sample_count) {
