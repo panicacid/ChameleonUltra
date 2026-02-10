@@ -171,14 +171,18 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     // Based on expert advice: Use 11111 preamble to recover tag's clock
     // T0 = carrier period (1/125kHz), but frequency may vary - use sync to measure!
     
-    int start_idx = 1200;  // Skip ~10ms muzzle flash
+    // DYNAMIC QUIET ZONE DETECTION
+    // Don't use hard-coded skip! Find the real preamble start dynamically
+    // Tag responds ~5ms after command, but we need to find exactly when
     
-    if (sample_count < start_idx + 5000) {
-        NRF_LOG_INFO("Not enough samples for preamble detection");
+    int start_idx = 200;  // Skip only initial TX noise
+    
+    if (sample_count < 5000) {
+        NRF_LOG_INFO("Not enough samples for detection");
         return 0;
     }
     
-    NRF_LOG_INFO("Synchronous Manchester decoder with preamble clock recovery");
+    NRF_LOG_INFO("Synchronous Manchester decoder with dynamic quiet zone detection");
     
     // Step 1: Apply low-pass filter y[n] = (x[n] + x[n-1]) / 2
     // This smooths noise while preserving signal structure
@@ -193,9 +197,61 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
         filtered[i] = (samples[i] + samples[i-1]) / 2;
     }
     
-    // Find baseline for peak detection
+    // Step 2: Find quiet zone (unmodulated carrier before tag response)
+    // Quiet zone = low variance (stable carrier)
+    #define QUIET_WINDOW 100
+    #define QUIET_THRESHOLD 200
+    
+    int quiet_zone_end = start_idx;
+    for (int i = start_idx; i < sample_count - QUIET_WINDOW; i += 50) {
+        // Calculate variance in this window
+        uint32_t mean = 0;
+        for (int j = 0; j < QUIET_WINDOW; j++) {
+            mean += filtered[i + j];
+        }
+        mean /= QUIET_WINDOW;
+        
+        uint32_t variance = 0;
+        for (int j = 0; j < QUIET_WINDOW; j++) {
+            int32_t diff = (int32_t)filtered[i + j] - (int32_t)mean;
+            variance += diff * diff;
+        }
+        variance /= QUIET_WINDOW;
+        
+        if (variance < QUIET_THRESHOLD) {
+            quiet_zone_end = i + QUIET_WINDOW;
+            NRF_LOG_INFO("Quiet zone found ending at sample %d (~%dms)", quiet_zone_end, (quiet_zone_end * 8) / 1000);
+            break;
+        }
+    }
+    
+    // Step 3: Find modulation start (tag begins load-modulating)
+    // Modulation = high variance (signal varies)
+    int preamble_start = quiet_zone_end;
+    for (int i = quiet_zone_end; i < sample_count - QUIET_WINDOW; i += 10) {
+        uint32_t mean = 0;
+        for (int j = 0; j < QUIET_WINDOW; j++) {
+            mean += filtered[i + j];
+        }
+        mean /= QUIET_WINDOW;
+        
+        uint32_t variance = 0;
+        for (int j = 0; j < QUIET_WINDOW; j++) {
+            int32_t diff = (int32_t)filtered[i + j] - (int32_t)mean;
+            variance += diff * diff;
+        }
+        variance /= QUIET_WINDOW;
+        
+        if (variance > QUIET_THRESHOLD * 3) {
+            preamble_start = i;
+            NRF_LOG_INFO("Modulation start at sample %d (~%dms)", preamble_start, (preamble_start * 8) / 1000);
+            break;
+        }
+    }
+    
+    // Find baseline for peak detection from preamble region
     uint16_t min_sample = 4095, max_sample = 0;
-    for (int i = start_idx; i < start_idx + 5000; i++) {
+    for (int i = preamble_start; i < preamble_start + 2000 && i < sample_count; i++) {
         if (filtered[i] < min_sample) min_sample = filtered[i];
         if (filtered[i] > max_sample) max_sample = filtered[i];
     }
@@ -203,19 +259,19 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     
     NRF_LOG_INFO("Signal baseline: center=%d, swing=%d", center, max_sample - min_sample);
     
-    // Step 2: Find 5 preamble peaks (11111 sync pattern)
+    // Step 4: Find 5 preamble peaks from REAL preamble start (11111 sync pattern)
     // These are falling edges 32T0 apart
     uint32_t peaks[5];
     int peak_count = 0;
     
-    for (int i = start_idx + 1; i < sample_count - 1 && peak_count < 5; i++) {
+    for (int i = preamble_start + 1; i < sample_count - 1 && peak_count < 5; i++) {
         // Local maximum above baseline
         if (filtered[i] > filtered[i-1] && 
             filtered[i] > filtered[i+1] &&
             filtered[i] > center) {
             
             peaks[peak_count++] = i;
-            NRF_LOG_INFO("Preamble peak %d at sample %d", peak_count, i);
+            NRF_LOG_INFO("Preamble peak %d at sample %d (~%dms)", peak_count, i, (i * 8) / 1000);
             
             i += 20;  // Skip ahead to avoid double-counting
         }
@@ -227,7 +283,7 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
         return 0;
     }
     
-    // Step 3: Calculate τ = (fifth peak - first peak) / 4
+    // Step 5: Calculate τ = (fifth peak - first peak) / 4
     // This gives us the time between two edges that the tag is broadcasting
     // Tag's actual clock period (handles frequency variations!)
     uint32_t total_samples = peaks[4] - peaks[0];
@@ -237,7 +293,7 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     
     NRF_LOG_INFO("Clock recovery: τ=%dµs (from %d samples over 4 periods)", tau, total_samples);
     
-    // Step 4: Synchronous Manchester sampling
+    // Step 6: Synchronous Manchester sampling
     // Sample at first_peak + τ/2, then every τ for 32 bits
     // Compare sample at T with sample at T + τ/2 for Manchester decode
     uint32_t sample_time_us = (peaks[0] * 8) + half_tau;
