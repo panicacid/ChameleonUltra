@@ -249,26 +249,28 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     for (int bit = 0; bit < 32; bit++) {
         // Sample at T (beginning of bit period)
         uint32_t t1_idx = sample_time_us / 8;
-        if (t1_idx >= sample_count) break;
+        if (t1_idx >= sample_count - 1) break;
         uint16_t val1 = filtered[t1_idx];
         
         // Sample at T + τ/2 (middle of bit period)
         uint32_t t2_idx = (sample_time_us + half_tau) / 8;
-        if (t2_idx >= sample_count) break;
+        if (t2_idx >= sample_count - 1) break;
         uint16_t val2 = filtered[t2_idx];
         
-        // Manchester decode: High→Low = 1, Low→High = 0
-        if (val1 > center && val2 < center) {
-            // Falling transition = bit 1
+        // Manchester decode using derivative: y[n] - y[n-1]
+        // If derivative < 0 (falling edge), bit = 1
+        // If derivative > 0 (rising edge), bit = 0
+        int16_t derivative = (int16_t)val2 - (int16_t)val1;
+        
+        if (derivative < 0) {
+            // Falling edge = bit 1
             uid |= (1 << bit);
-        } else if (val1 < center && val2 > center) {
-            // Rising transition = bit 0
-            // (uid bit already 0)
         }
+        // else: Rising edge = bit 0 (uid bit already 0)
         
         if (bit < 8) {
-            NRF_LOG_INFO("Bit %d: val1=%d val2=%d (center=%d) → %d", 
-                         bit, val1, val2, center, (uid >> bit) & 1);
+            NRF_LOG_INFO("Bit %d: val1=%d val2=%d derivative=%d → %d", 
+                         bit, val1, val2, derivative, (uid >> bit) & 1);
         }
         
         bits_decoded++;
