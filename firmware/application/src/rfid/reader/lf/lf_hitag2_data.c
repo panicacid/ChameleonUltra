@@ -312,27 +312,27 @@ static void hitag2_timeslot_callback(void) {
 
 
 /**
- * Universal Translator: Maps real-world µs to decoder's magic numbers
+ * Universal Translator: Maps real-world µs to decoder's expected microseconds
  * 
- * The Hitag2 decoder (hitag.c) expects specific timing values:
- * - SHORT (Period 0): 48 (window: 16-80)
- * - LONG (Period 1): 112 (window: 80-144)
+ * The Hitag2 decoder (hitag.c) expects microsecond timing values:
+ * - SHORT (Period 0): 128µs target (accepts 64-192µs)
+ * - LONG (Period 2): 256µs target (accepts 192-320µs)
  * 
  * Our Paxton tags send RF/32 timing (faster than standard RF/50):
  * - Real Short: ~96-152µs
  * - Real Long: ~200-320µs
  * 
- * This translator bridges the gap by converting real µs to decoder units.
+ * This translator normalizes tag timing to standard decoder expectations.
  */
 static uint8_t translate_interval(uint16_t real_us) {
-    // Real Short (80-180µs) → Decoder Short (48)
+    // Real Short (80-180µs) → Decoder Short (128µs)
     if (real_us >= 80 && real_us <= 180) {
-        return 48;  // DECODER_TARGET_SHORT
+        return 128;  // HITAG_T_SHORT - decoder recognizes as period 0
     }
     
-    // Real Long (181-350µs) → Decoder Long (112)
+    // Real Long (181-350µs) → Decoder Long (200µs)
     if (real_us > 180 && real_us <= 350) {
-        return 112;  // DECODER_TARGET_LONG
+        return 200;  // Safely > 192 threshold, decoder recognizes as period 2
     }
     
     // Noise/glitches outside expected ranges
