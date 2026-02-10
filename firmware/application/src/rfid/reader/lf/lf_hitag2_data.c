@@ -29,9 +29,10 @@ NRF_LOG_MODULE_REGISTER();
 
 // Buffer size calculation:
 // PWM at 125kHz = 125,000 samples/second
-// 50ms collection = 6,250 samples needed
-// Use 8192 (power of 2) for 30% safety margin
-#define HITAG2_BUFFER_SIZE        8192  // Was 128 - CRITICAL FIX for buffer overflow
+// 100ms collection = 12,500 samples needed
+// Use 16384 (power of 2) for full UID capture with margin
+// CRITICAL: 8192 was too small - only captured ~30 edges (need ~70+)
+#define HITAG2_BUFFER_SIZE        16384  // Doubled for full 32-bit UID capture
 
 // Calibrated threshold based on scope measurements
 // Scope data: Floor=0V, Weak data peaks=2.25V, Strong peaks=3.28V
@@ -319,19 +320,21 @@ static void hitag2_timeslot_callback(void) {
  * - LONG (Period 2): 256µs target (accepts 192-320µs)
  * 
  * Our Paxton tags send RF/32 timing (faster than standard RF/50):
- * - Real Short: ~96-152µs
- * - Real Long: ~200-320µs
+ * - Real Short: ~96-168µs (widened to capture jittery edges)
+ * - Real Long: ~200-380µs (extended for slow responses)
  * 
  * This translator normalizes tag timing to standard decoder expectations.
  */
 static uint8_t translate_interval(uint16_t real_us) {
-    // Real Short (80-180µs) → Decoder Short (128µs)
-    if (real_us >= 80 && real_us <= 180) {
+    // Real Short (60-185µs) → Decoder Short (128µs)
+    // WIDENED: Was 80-180, now 60-185 to capture timing variations
+    if (real_us >= 60 && real_us <= 185) {
         return 128;  // HITAG_T_SHORT - decoder recognizes as period 0
     }
     
-    // Real Long (181-350µs) → Decoder Long (200µs)
-    if (real_us > 180 && real_us <= 350) {
+    // Real Long (186-380µs) → Decoder Long (200µs)
+    // WIDENED: Was 181-350, now 186-380 for better tolerance
+    if (real_us > 185 && real_us <= 380) {
         return 200;  // Safely > 192 threshold, decoder recognizes as period 2
     }
     
@@ -376,19 +379,22 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     
     NRF_LOG_INFO("START_AUTH transmitted, collecting SAADC samples...");
     
-    // Use larger static array to hold full response (8192 samples = 65ms at 125kHz)
-    // Static to avoid stack overflow (16KB is too large for stack)
-    static uint16_t samples[8192];
+    // Use larger static array to hold full response
+    // DOUBLED: 16384 samples = 131ms at 125kHz (was 8192 = 65ms)
+    // CRITICAL: Need full buffer to capture complete 32-bit UID + CRC
+    // Static to avoid stack overflow (32KB is too large for stack)
+    static uint16_t samples[16384];
     int sample_count = 0;
     
-    // Continuous drain loop: don't sleep, actively drain buffer for 50ms
+    // Continuous drain loop: actively drain buffer for 100ms (was 50ms)
+    // EXTENDED: Need longer capture window for full UID transmission
     // This prevents circular buffer overflow and captures complete tag response
     autotimer *p_at = bsp_obtain_timer(0);  // Obtain timer with 0 initial value
     
-    while (NO_TIMEOUT_1MS(p_at, 50) && sample_count < 8192) {
+    while (NO_TIMEOUT_1MS(p_at, 100) && sample_count < 16384) {
         uint16_t val;
         // Drain all available samples from circular buffer
-        while (cb_pop_front(&cb, &val) && sample_count < 8192) {
+        while (cb_pop_front(&cb, &val) && sample_count < 16384) {
             samples[sample_count++] = val;
             
             // Log first 20 samples for debugging
@@ -438,19 +444,20 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         NRF_LOG_INFO("INT[%d]: %dµs", i, intervals[i]);
     }
     
-    // SOF Detection: Scan for 5 consecutive short intervals (80-160µs)
-    // This identifies the 11111 SOF header (112µs, 144µs pulses)
+    // SOF Detection: Scan for 5 consecutive short intervals (80-185µs)
+    // RELAXED: Was 80-160µs, now 80-185µs to capture timing jitter
+    // This identifies the 11111 SOF header with wider tolerance
     int sof_start = -1;
     for (int i = 0; i < edge_count - 5; i++) {
         int consecutive_short = 0;
         for (int j = 0; j < 5; j++) {
-            if (intervals[i+j] >= 80 && intervals[i+j] <= 160) {
+            if (intervals[i+j] >= 80 && intervals[i+j] <= 185) {
                 consecutive_short++;
             }
         }
         if (consecutive_short >= 5) {
             sof_start = i;
-            NRF_LOG_INFO("SOF detected at index %d (5+ consecutive 80-160µs intervals)", sof_start);
+            NRF_LOG_INFO("SOF detected at index %d (5+ consecutive 80-185µs intervals)", sof_start);
             break;
         }
     }
