@@ -210,74 +210,91 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
         return 0;  // No edges - ghost tag killed
     }
     
-    // ANTI-STUTTER PEAK DETECTION with 20% Hysteresis
-    // Prevents noise ripples at peak tops from being counted as multiple edges
-    // Use TIMING between peaks (not amplitude) to classify SHORT vs LONG
-    
-    uint16_t hysteresis_threshold = swing / 5;  // 20% of swing
+    // ADAPTIVE SLIDING WINDOW DETECTION
+    // Problem: Global 20% hysteresis (2593 ADC) exceeds tag backscatter depth (300-800 ADC)
+    // Solution: Use LOCAL thresholds per 1000-sample window (8ms)
+    // Tag backscatter is shallow load modulation - only 2-6% of carrier swing!
     
     NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV), swing=%d ADC",
                  min_sample, (min_sample * 3300) / 4095,
                  max_sample, (max_sample * 3300) / 4095,
                  swing);
-    NRF_LOG_INFO("Anti-Stutter Detection: hysteresis=%d ADC (20%% swing), timing-based intervals", hysteresis_threshold);
     
-    // Peak/valley detection with hysteresis state machine
+    #define WINDOW_SIZE 1000        // 8ms window
+    #define WINDOW_STEP 500         // 4ms step (50% overlap)
+    #define MIN_HYSTERESIS 400      // Minimum for tag backscatter
+    #define HYSTERESIS_PERCENT 5    // 5% of local swing
+    
+    NRF_LOG_INFO("Using Adaptive Sliding Window (size=%d, step=%d, min_hyst=%d ADC)", 
+                 WINDOW_SIZE, WINDOW_STEP, MIN_HYSTERESIS);
+    
     int interval_count = 0;
-    bool looking_for_peak = true;  // Start looking for first peak
-    uint16_t last_peak_value = 0;
-    uint16_t last_valley_value = 0;
-    uint32_t last_peak_sample_idx = 0;
+    uint32_t last_edge_idx = start_idx;
+    bool state_high = false;
     
-    NRF_LOG_INFO("Using Anti-Stutter Peak Detection with 20%% hysteresis");
-    
-    for (int i = start_idx + 1; i < sample_count - 1 && interval_count < max_intervals; i++) {
-        uint16_t sample = samples[i];
+    // Slide window through signal
+    for (int window_start = start_idx; 
+         window_start + WINDOW_SIZE < sample_count && interval_count < max_intervals; 
+         window_start += WINDOW_STEP) {
         
-        if (looking_for_peak) {
-            // Looking for PEAK (local maximum)
-            // Must be higher than neighbors
-            if (sample > samples[i-1] && sample > samples[i+1]) {
-                // Verify hysteresis: must be threshold above last valley
-                if (last_valley_value == 0 || sample > last_valley_value + hysteresis_threshold) {
-                    // Valid peak found!
-                    
-                    // Calculate TIMING-based interval
-                    if (last_peak_sample_idx > 0) {
-                        uint32_t interval_samples = i - last_peak_sample_idx;
-                        uint16_t interval_us = interval_samples * 8;
-                        
-                        // Classify by TIME (not amplitude) to reveal Manchester data
-                        if (interval_us >= 80 && interval_us < 180) {
-                            // ~125µs → SHORT
-                            intervals[interval_count++] = 128;
-                        } else if (interval_us >= 180 && interval_us <= 350) {
-                            // ~250µs → LONG
-                            intervals[interval_count++] = 200;
-                        }
-                        // Skip if outside range (noise or field artifact)
-                    }
-                    
-                    last_peak_value = sample;
-                    last_peak_sample_idx = i;
-                    looking_for_peak = false;  // Now look for valley
-                }
+        // Calculate LOCAL min/max for this window only
+        uint16_t local_min = 4095, local_max = 0;
+        for (int i = window_start; i < window_start + WINDOW_SIZE; i++) {
+            if (samples[i] < local_min) local_min = samples[i];
+            if (samples[i] > local_max) local_max = samples[i];
+        }
+        
+        // LOCAL thresholds adapt to current carrier level
+        uint16_t local_center = (local_min + local_max) / 2;
+        uint16_t local_swing = local_max - local_min;
+        
+        // Hysteresis: 5% of local swing OR 400 ADC minimum (tag modulation depth)
+        uint16_t local_hysteresis = (local_swing * HYSTERESIS_PERCENT) / 100;
+        if (local_hysteresis < MIN_HYSTERESIS) {
+            local_hysteresis = MIN_HYSTERESIS;
+        }
+        
+        uint16_t high_thresh = local_center + local_hysteresis;
+        uint16_t low_thresh = local_center - local_hysteresis;
+        
+        // Initialize state for this window
+        if (window_start == start_idx) {
+            state_high = (samples[window_start] > local_center);
+        }
+        
+        // Detect edges in THIS window with LOCAL thresholds
+        for (int i = window_start; i < window_start + WINDOW_SIZE && interval_count < max_intervals; i++) {
+            bool edge_detected = false;
+            
+            if (!state_high && samples[i] > high_thresh) {
+                // Rising edge
+                edge_detected = true;
+                state_high = true;
             }
-        } else {
-            // Looking for VALLEY (local minimum)
-            // Must be lower than neighbors
-            if (sample < samples[i-1] && sample < samples[i+1]) {
-                // Verify hysteresis: must be threshold below last peak
-                if (sample < last_peak_value - hysteresis_threshold) {
-                    // Valid valley found!
-                    last_valley_value = sample;
-                    looking_for_peak = true;  // Now look for peak
+            else if (state_high && samples[i] < low_thresh) {
+                // Falling edge
+                edge_detected = true;
+                state_high = false;
+            }
+            
+            if (edge_detected && i > last_edge_idx) {
+                // Calculate timing-based interval
+                uint32_t interval_samples = i - last_edge_idx;
+                uint16_t interval_us = interval_samples * 8;
+                
+                // Classify by TIME to reveal Manchester data
+                if (interval_us >= 60 && interval_us < 180) {
+                    intervals[interval_count++] = 128;  // SHORT
+                } else if (interval_us >= 180 && interval_us <= 380) {
+                    intervals[interval_count++] = 200;  // LONG
                 }
+                
+                last_edge_idx = i;
             }
         }
     }
     
-    NRF_LOG_INFO("Detected %d edges from %d samples using Anti-Stutter detection", interval_count, sample_count);
+    NRF_LOG_INFO("Detected %d edges from %d samples using Adaptive Sliding Window", interval_count, sample_count);
     return interval_count;
 }
 
