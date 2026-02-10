@@ -312,6 +312,34 @@ static void hitag2_timeslot_callback(void) {
 
 
 /**
+ * Universal Translator: Maps real-world µs to decoder's magic numbers
+ * 
+ * The Hitag2 decoder (hitag.c) expects specific timing values:
+ * - SHORT (Period 0): 48 (window: 16-80)
+ * - LONG (Period 1): 112 (window: 80-144)
+ * 
+ * Our Paxton tags send RF/32 timing (faster than standard RF/50):
+ * - Real Short: ~96-152µs
+ * - Real Long: ~200-320µs
+ * 
+ * This translator bridges the gap by converting real µs to decoder units.
+ */
+static uint8_t translate_interval(uint16_t real_us) {
+    // Real Short (80-180µs) → Decoder Short (48)
+    if (real_us >= 80 && real_us <= 180) {
+        return 48;  // DECODER_TARGET_SHORT
+    }
+    
+    // Real Long (181-350µs) → Decoder Long (112)
+    if (real_us > 180 && real_us <= 350) {
+        return 112;  // DECODER_TARGET_LONG
+    }
+    
+    // Noise/glitches outside expected ranges
+    return 0;
+}
+
+/**
  * Attempt to read Hitag2 tag UID using RTF protocol
  * 
  * Protocol flow adapted for ChameleonUltra hardware:
@@ -437,26 +465,8 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         NRF_LOG_INFO("Feeding all %d intervals to decoder", edge_count);
     }
     
-    // Clock Normalization (Suut Sync): Calculate scale factor from SOF
-    // Measures average SOF interval and scales all intervals to 125µs standard
-    float scale = 1.0f;  // Default: no scaling
-    if (sof_start >= 0 && sof_start + 5 <= edge_count) {
-        uint32_t sof_sum = 0;
-        for (int k = 0; k < 5; k++) {
-            sof_sum += intervals[sof_start + k];
-        }
-        float avg_sof = (float)sof_sum / 5.0f;
-        scale = 125.0f / avg_sof;  // Target 125µs standard timing
-        
-        // Fix float logging: cast to int with precision (NRF_LOG doesn't support %f)
-        int avg_sof_int = (int)(avg_sof * 10);   // 124.8 → 1248 (tenths)
-        int scale_int = (int)(scale * 1000);     // 1.002 → 1002 (thousandths)
-        NRF_LOG_INFO("Clock Normalization: SOF_avg=%d.%dµs, Scale=%d.%03d", 
-                     avg_sof_int/10, avg_sof_int%10, 
-                     scale_int/1000, scale_int%1000);
-    }
-    
     // Feed intervals to Manchester decoder with sliding window retry
+    // Use Universal Translator to convert real µs to decoder's magic numbers
     // Try offsets 0, 1, 2, 3 from SOF to handle extra noise edges
     bool ok = false;
     
@@ -469,12 +479,12 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         for (int i = start_pos; i < edge_count; i++) {
             uint16_t raw_interval = intervals[i];
             
-            // Apply clock normalization to compensate for timing jitter
-            // Feed normalized intervals directly - no quantization
-            // Quantization was destroying timing information decoder needs
-            uint16_t normalized_interval = (uint16_t)((float)raw_interval * scale);
+            // Translate real-world µs to decoder's expected values (48, 112)
+            // This bridges the gap between RF/32 (Paxton) and RF/50 (decoder expects)
+            uint8_t translated_interval = translate_interval(raw_interval);
             
-            if (hitag2.decoder.feed(codec, normalized_interval)) {
+            // Feed translated interval to decoder
+            if (hitag2.decoder.feed(codec, translated_interval)) {
                 memcpy(data, hitag2.get_data(codec), hitag2.data_size);
                 ok = true;
                 NRF_LOG_INFO("Offset %d SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
