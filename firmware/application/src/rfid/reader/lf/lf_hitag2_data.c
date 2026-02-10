@@ -207,83 +207,79 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
         return 0;  // No edges - ghost tag killed
     }
     
-    // Calculate AVERAGE threshold (outlier-resistant)
-    // Democracy principle: One glitch at 2412 + 5999 samples at 10000 = average ~10000
-    // Midpoint would be: (2412 + 11488) / 2 = 6950 (FAILS - too low)
-    // Average: sum / count = ~10000 (WORKS - centered on real signal)
-    uint16_t threshold = sum / valid_samples;
+    // SOFTWARE SCHMITT TRIGGER (Hysteresis Comparator)
+    // Emulates hardware comparator used in RFIDler
+    // More robust to gentle LPF-filtered edges than derivative detection
+    
+    // Step A: Calculate center threshold
+    uint16_t center = (min_sample + max_sample) / 2;
+    
+    // Step B: Define hysteresis (10% noise margin)
+    // Prevents oscillation on noisy edges
+    uint16_t hysteresis = (max_sample - min_sample) / 10;
+    uint16_t high_thresh = center + hysteresis;
+    uint16_t low_thresh = center - hysteresis;
     
     NRF_LOG_INFO("Sample range: min=%d (~%dmV), max=%d (~%dmV), swing=%d ADC",
                  min_sample, (min_sample * 3300) / 4095,
                  max_sample, (max_sample * 3300) / 4095,
                  swing);
-    NRF_LOG_INFO("POST-TX AVERAGE threshold: %d ADC (~%dmV) - outlier-resistant (N=%d)",
-                 threshold, (threshold * 3300) / 4095, valid_samples);
+    NRF_LOG_INFO("Schmitt Trigger: center=%d, high_thresh=%d, low_thresh=%d, hysteresis=%d ADC",
+                 center, high_thresh, low_thresh, hysteresis);
     
-    // DERIVATIVE-BASED EDGE DETECTION (Smoothing + Slope Analysis)
-    // More robust to amplitude variations and noise than threshold crossing
-    NRF_LOG_INFO("Using derivative edge detection with 3-point smoothing");
-    NRF_LOG_INFO("Dynamic derivative threshold: %d ADC (swing/4 = %d/4)", swing/4, swing);
-    
-    int last_edge_index = 0;
+    // Step C: State machine with hysteresis
+    // Initialize state based on first post-TX sample
+    bool state_high = (samples[start_idx] > center);
+    int last_edge_index = start_idx;
     int interval_count = 0;
-    int16_t last_smoothed = -1;
     
-    // DYNAMIC Derivative threshold - adapts to signal strength
-    // swing/4 provides adaptive sensitivity for varying signal levels
-    // Weak signal (swing=2000): threshold=500
-    // Strong signal (swing=8000): threshold=2000
-    int16_t DERIVATIVE_THRESHOLD = swing / 4;
+    NRF_LOG_INFO("Using Software Schmitt Trigger edge detection");
+    NRF_LOG_INFO("Initial state: %s (sample[%d]=%d vs center=%d)",
+                 state_high ? "HIGH" : "LOW", start_idx, samples[start_idx], center);
     
-    for (int i = 1; i < sample_count - 1 && interval_count < max_intervals; i++) {
-        // 3-point moving average smoothing to reduce noise
-        int16_t smoothed = (samples[i-1] + samples[i] + samples[i+1]) / 3;
+    for (int i = start_idx + 1; i < sample_count && interval_count < max_intervals; i++) {
+        uint16_t sample = samples[i];
+        bool edge_detected = false;
         
-        if (last_smoothed >= 0) {
-            // Calculate derivative (slope between samples)
-            int16_t derivative = smoothed - last_smoothed;
+        if (!state_high && sample > high_thresh) {
+            // RISING EDGE: Signal crossed high threshold while in LOW state
+            edge_detected = true;
+            state_high = true;
+        } else if (state_high && sample < low_thresh) {
+            // FALLING EDGE: Signal crossed low threshold while in HIGH state
+            edge_detected = true;
+            state_high = false;
+        }
+        
+        if (edge_detected) {
+            // Calculate interval in sample units
+            int sample_interval = i - last_edge_index;
             
-            // Detect edges via significant slope changes
-            bool edge_detected = false;
-            if (derivative > DERIVATIVE_THRESHOLD) {
-                // Rising edge (strong positive slope)
-                edge_detected = true;
-            } else if (derivative < -DERIVATIVE_THRESHOLD) {
-                // Falling edge (strong negative slope)
-                edge_detected = true;
-            }
+            // Convert to microseconds (SAADC at 125kHz = 8µs per sample)
+            const uint8_t MICROSECONDS_PER_SAMPLE = 8;
+            uint16_t interval_us = sample_interval * MICROSECONDS_PER_SAMPLE;
             
-            if (edge_detected) {
-                // Calculate interval in sample units
-                int sample_interval = i - last_edge_index;
+            // Filter noise and field stabilization
+            if (interval_us < 20) {
+                // Skip very short glitches
+                last_edge_index = i;
+            } else if (interval_count == 0 && interval_us > 1000) {
+                // Skip field stabilization (first long edge)
+                last_edge_index = i;
+            } else {
+                // Store valid interval
+                intervals[interval_count++] = interval_us;
+                last_edge_index = i;
                 
-                // Convert to microseconds (SAADC at 125kHz = 8µs per sample)
-                const uint8_t MICROSECONDS_PER_SAMPLE = 8;
-                uint16_t interval_us = sample_interval * MICROSECONDS_PER_SAMPLE;
-                
-                // Filter noise and field stabilization
-                if (interval_us < 20) {
-                    // Skip very short glitches
-                    last_edge_index = i;
-                } else if (interval_count == 0 && interval_us > 1000) {
-                    // Skip field stabilization (first long edge)
-                    last_edge_index = i;
-                } else {
-                    // Store valid interval
-                    intervals[interval_count++] = interval_us;
-                    last_edge_index = i;
-                    
-                    if (interval_count <= 10) {
-                        NRF_LOG_INFO("Edge %d: %d samples = %dµs (derivative=%d)", 
-                                     interval_count, sample_interval, interval_us, derivative);
-                    }
-                }
+                if (interval_count <= 10) {
+                    NRF_LOG_INFO("Edge %d: %d samples = %dµs (%s, sample=%d)", 
+                                 interval_count, sample_interval, interval_us,
+                                 state_high ? "RISING" : "FALLING", sample);
             }
         }
-        last_smoothed = smoothed;
     }
     
-    NRF_LOG_INFO("Detected %d edges from %d samples", interval_count, sample_count);
+    NRF_LOG_INFO("Detected %d edges from %d samples using Schmitt Trigger", interval_count, sample_count);
     return interval_count;
 }
 
