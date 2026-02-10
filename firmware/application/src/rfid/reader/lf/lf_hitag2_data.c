@@ -375,7 +375,7 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     init_hitag2_hw();
     
     // Request timeslot for transmission
-    request_timeslot(60000, hitag2_timeslot_callback);  // 60ms for full response
+    request_timeslot(80000, hitag2_timeslot_callback);  // 80ms for full response
     
     NRF_LOG_INFO("START_AUTH transmitted, collecting SAADC samples...");
     
@@ -386,12 +386,12 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
     static uint16_t samples[16384];
     int sample_count = 0;
     
-    // Continuous drain loop: actively drain buffer for 100ms (was 50ms)
-    // EXTENDED: Need longer capture window for full UID transmission
+    // Continuous drain loop: actively drain buffer for 80ms (matches timeslot)
+    // ALIGNED: Matches hardware timeslot duration for consistent timing
     // This prevents circular buffer overflow and captures complete tag response
     autotimer *p_at = bsp_obtain_timer(0);  // Obtain timer with 0 initial value
     
-    while (NO_TIMEOUT_1MS(p_at, 100) && sample_count < 16384) {
+    while (NO_TIMEOUT_1MS(p_at, 80) && sample_count < 16384) {
         uint16_t val;
         // Drain all available samples from circular buffer
         while (cb_pop_front(&cb, &val) && sample_count < 16384) {
