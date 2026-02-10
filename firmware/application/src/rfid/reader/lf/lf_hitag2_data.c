@@ -236,8 +236,6 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
     int interval_count = 0;
     
     NRF_LOG_INFO("Using Software Schmitt Trigger edge detection");
-    NRF_LOG_INFO("Initial state: %s (sample[%d]=%d vs center=%d)",
-                 state_high ? "HIGH" : "LOW", start_idx, samples[start_idx], center);
     
     for (int i = start_idx + 1; i < sample_count && interval_count < max_intervals; i++) {
         uint16_t sample = samples[i];
@@ -272,12 +270,6 @@ static int hitag2_detect_edges_from_saadc(uint16_t *samples, int sample_count,
                 // Store valid interval
                 intervals[interval_count++] = interval_us;
                 last_edge_index = i;
-                
-                if (interval_count <= 10) {
-                    NRF_LOG_INFO("Edge %d: %d samples = %dµs (%s, sample=%d)", 
-                                 interval_count, sample_interval, interval_us,
-                                 state_high ? "RISING" : "FALLING", sample);
-                }
             }
         }
     }
@@ -396,13 +388,6 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         // Drain all available samples from circular buffer
         while (cb_pop_front(&cb, &val) && sample_count < 16384) {
             samples[sample_count++] = val;
-            
-            // Log first 20 samples for debugging
-            if (sample_count <= 20) {
-                // Convert to millivolts: (sample / 4095) * 3300
-                uint32_t mv = (val * 3300) / 4095;
-                NRF_LOG_INFO("Sample[%d]: %d (~%dmV)", sample_count-1, val, mv);
-            }
         }
         // Brief yield to allow SAADC interrupt to fire
         bsp_delay_us(100);
@@ -436,12 +421,6 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         cb_free(&cb);
         hitag2.free(codec);
         return false;
-    }
-    
-    // DEBUG: Log first 32 intervals in microseconds for analysis
-    NRF_LOG_INFO("First 32 intervals (µs):");
-    for (int i = 0; i < edge_count && i < 32; i++) {
-        NRF_LOG_INFO("INT[%d]: %dµs", i, intervals[i]);
     }
     
     // SOF Detection: Scan for 5 consecutive short intervals (80-185µs)
