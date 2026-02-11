@@ -309,10 +309,10 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
     }
     
     // Step 5: Manchester decode from intervals
-    // Start after preamble (skip 10 short pulses)
+    // Start after preamble (skip 10 short pulses + 1 for alignment)
     uint32_t uid = 0;
-    int interval_idx = preamble_start + 10;
-    bool last_bit = true;  // Preamble ends with logic 1
+    int interval_idx = preamble_start + 11;  // +11 to correct 1-bit shift
+    bool last_bit = false;  // Start with inverted polarity
     
     NRF_LOG_INFO("Step 5: Decoding 32-bit UID from intervals");
     
@@ -348,7 +348,15 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
         }
     }
     
-    NRF_LOG_INFO("Decoded 32-bit UID: 0x%08X", uid);
+    // Calibration debug output
+    NRF_LOG_INFO("=== Calibration Debug ===");
+    NRF_LOG_INFO("Raw Decoded UID: 0x%08X", uid);
+    
+    uint32_t inverted = ~uid;
+    NRF_LOG_INFO("Inverted (~UID): 0x%08X", inverted);
+    
+    uint32_t shifted = (uid >> 1) & 0xFFFFFFFF;
+    NRF_LOG_INFO("Shifted Fix (UID>>1): 0x%08X", shifted);
     
     // Copy UID to output
     memcpy(data, &uid, 4);
