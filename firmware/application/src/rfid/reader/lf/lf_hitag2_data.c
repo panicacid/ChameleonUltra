@@ -282,13 +282,13 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
     
     NRF_LOG_INFO("Extracted %d pulse intervals", interval_count);
     
-    // Step 4: Find preamble - 10+ consecutive short pulses (12-24 samples)
+    // Step 4: Find preamble - 10+ consecutive short pulses (8-24 samples)
     int preamble_start = -1;
     for (int i = 0; i < interval_count - 10; i++) {
         bool is_preamble = true;
         
         for (int j = 0; j < 10; j++) {
-            if (intervals[i+j] < 12 || intervals[i+j] > 24) {
+            if (intervals[i+j] < 8 || intervals[i+j] > 24) {
                 is_preamble = false;
                 break;
             }
@@ -308,52 +308,57 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
         return false;
     }
     
-    // Step 5: Decode Manchester (Locked to Candidate B settings)
-    // Settings: +10 offset, inverted polarity (last_bit starts false)
-    // Tolerances relaxed to accept narrower pulses (avoid desync)
+    // Step 5: Raw Bit Stream Dump
+    // Decode 64 bits with NO shifting or inversion
+    // This shows the exact Manchester decoded stream for analysis
     
-    NRF_LOG_INFO("Step 5: Decoding 32-bit UID (Candidate B: +10 Inverted)");
+    NRF_LOG_INFO("Step 5: Dumping raw 64-bit stream (no transformations)");
     
-    uint32_t uid = 0;
-    bool last_bit = false;  // Inverted polarity (Candidate B)
-    int interval_idx = preamble_start + 10;  // Candidate B offset
+    char bit_stream[65];  // 64 bits + null terminator
+    bool current_bit = true;  // Preamble ends with logic 1
+    int interval_idx = preamble_start + 10;  // Start after preamble
     
-    for (int bit = 0; bit < 32; bit++) {
+    for (int bit = 0; bit < 64; bit++) {
         if (interval_idx >= interval_count) {
             NRF_LOG_ERROR("Ran out of intervals at bit %d", bit);
+            // Fill remaining with 'X'
+            for (int j = bit; j < 64; j++) {
+                bit_stream[j] = 'X';
+            }
             break;
         }
         
         uint16_t pulse = intervals[interval_idx++];
         
-        // Relaxed tolerances to keep stream synchronized
+        // Manchester decoding: Short=transition, Long=repeat
         if (pulse >= 8 && pulse <= 24) {
             // Short pulse = transition
-            last_bit = !last_bit;
+            current_bit = !current_bit;
         } else if (pulse >= 25 && pulse <= 50) {
-            // Long pulse = no transition (last_bit stays same)
+            // Long pulse = no transition (current_bit stays same)
         } else {
-            NRF_LOG_WARNING("Unusual pulse width: %d at bit %d", pulse, bit);
+            // Unusual pulse - mark as unknown
+            bit_stream[bit] = '?';
+            continue;
         }
         
-        if (last_bit) {
-            uid |= (1 << bit);
-        }
+        bit_stream[bit] = current_bit ? '1' : '0';
         
-        if (bit < 8) {
-            NRF_LOG_INFO("Bit %d: pulse=%d → bit=%d", bit, pulse, last_bit ? 1 : 0);
+        // Log first 16 bits in detail
+        if (bit < 16) {
+            NRF_LOG_INFO("Bit %d: pulse=%d → bit=%c", bit, pulse, bit_stream[bit]);
         }
     }
     
-    NRF_LOG_INFO("Decoded raw UID: 0x%08X", uid);
+    bit_stream[64] = '\0';  // Null terminate
     
-    // Apply right shift by 1 to correct alignment
-    // This turns 0x28... into 0x14... (target)
-    uid = uid >> 1;
-    NRF_LOG_INFO("After >>1 shift: 0x%08X (final UID)", uid);
+    NRF_LOG_INFO("=== RAW BIT STREAM (64 bits) ===");
+    NRF_LOG_INFO("[Raw Stream]: %s", bit_stream);
+    NRF_LOG_INFO("=== This is the unmodified Manchester decoded stream ===");
     
-    // Copy UID to output
-    memcpy(data, &uid, 4);
+    // For now, return a dummy UID (user wants to see the raw stream)
+    uint32_t dummy_uid = 0xDEADBEEF;
+    memcpy(data, &dummy_uid, 4);
     
     free(intervals);
     free(filtered);
