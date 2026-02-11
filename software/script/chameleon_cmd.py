@@ -534,6 +534,30 @@ class ChameleonCMD:
         data = struct.pack(f'!4s4s{4*len(old_keys)}s', id_bytes, new_key, b''.join(old_keys))
         return self.device.send_cmd_sync(Command.VIKING_WRITE_TO_T55XX, data)
 
+    @expect_response(Status.LF_TAG_OK)
+    def hitag2_scan(self):
+        """
+        Read the UID of Hitag2 tag.
+
+        :return: response with parsed UID
+        """
+        resp = self.device.send_cmd_sync(Command.HITAG2_SCAN)
+        if resp.status == Status.LF_TAG_OK:
+            resp.parsed = resp.data  # uid
+        return resp
+
+    @expect_response(Status.LF_TAG_OK)
+    def hitag2_write_to_t55xx(self, uid_bytes: bytes):
+        """
+        Write Hitag2 UID into T55XX.
+
+        :param uid_bytes: UID (4 bytes)
+        :return:
+        """
+        if len(uid_bytes) != 4:
+            raise ValueError("The uid bytes length must equal 4")
+        return self.device.send_cmd_sync(Command.HITAG2_WRITE_TO_T55XX, uid_bytes)
+
     @expect_response(Status.SUCCESS)
     def get_slot_info(self):
         """
@@ -730,6 +754,28 @@ class ChameleonCMD:
         Get the emulated Viking card id
         """
         resp = self.device.send_cmd_sync(Command.VIKING_GET_EMU_ID)
+        resp.parsed = resp.data
+        return resp
+
+    @expect_response(Status.SUCCESS)
+    def hitag2_set_emu_id(self, uid: bytes):
+        """
+        Set the UID emulated by Hitag2.
+
+        :param uid: byte of the UID (4 bytes)
+        :return:
+        """
+        if len(uid) != 4:
+            raise ValueError("The uid bytes length must equal 4")
+        data = struct.pack('4s', uid)
+        return self.device.send_cmd_sync(Command.HITAG2_SET_EMU_ID, data)
+
+    @expect_response(Status.SUCCESS)
+    def hitag2_get_emu_id(self):
+        """
+        Get the emulated Hitag2 card UID
+        """
+        resp = self.device.send_cmd_sync(Command.HITAG2_GET_EMU_ID)
         resp.parsed = resp.data
         return resp
 

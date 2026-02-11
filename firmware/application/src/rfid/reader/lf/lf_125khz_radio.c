@@ -17,7 +17,8 @@ nrf_ppi_channel_t m_pwm_saadc_sample_ppi_channel;
 nrf_ppi_channel_t m_pwm_timer_count_ppi_channel;
 
 // At present, only channel 1 is used, so only one channel can be configured
-static nrf_pwm_values_individual_t m_lf_125khz_pwm_seq_val[] = {
+// Note: Not static - accessed by lf_hitag2_data.c for soft pulse control
+nrf_pwm_values_individual_t m_lf_125khz_pwm_seq_val[] = {
     {2, 0, 0, 0},
 };
 

@@ -95,6 +95,8 @@
 #define DATA_CMD_HIDPROX_WRITE_TO_T55XX         (3003)
 #define DATA_CMD_VIKING_SCAN                    (3004)
 #define DATA_CMD_VIKING_WRITE_TO_T55XX          (3005)
+#define DATA_CMD_HITAG2_SCAN                    (3007)
+#define DATA_CMD_HITAG2_WRITE_TO_T55XX          (3008)
 
 //
 // ******************************************************************
@@ -163,5 +165,7 @@
 #define DATA_CMD_HIDPROX_GET_EMU_ID             (5003)
 #define DATA_CMD_VIKING_SET_EMU_ID              (5004)
 #define DATA_CMD_VIKING_GET_EMU_ID              (5005)
+#define DATA_CMD_HITAG2_SET_EMU_ID              (5006)
+#define DATA_CMD_HITAG2_GET_EMU_ID              (5007)
 
 #endif
