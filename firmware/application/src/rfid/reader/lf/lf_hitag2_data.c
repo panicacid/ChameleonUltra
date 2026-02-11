@@ -299,6 +299,7 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
         uint16_t center = (global_min + global_max) / 2;
         
         uint32_t peaks[5];
+        uint16_t peak_heights[5];  // Track peak heights for quality check
         int peak_count = 0;
         
         for (int i = preamble_start + 1; i < sample_count - 1 && peak_count < 5; i++) {
@@ -309,8 +310,9 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
                 filtered[i] > center + 150) {  // Hysteresis: 150 ADC above baseline
                 
                 peaks[peak_count] = i;
+                peak_heights[peak_count] = filtered[i] - center;  // Store height
                 NRF_LOG_INFO("Preamble peak %d at sample %d (height=%d above center)", 
-                            peak_count + 1, i, filtered[i] - center);
+                            peak_count + 1, i, peak_heights[peak_count]);
                 peak_count++;
                 i += 20;  // Skip to avoid double-counting
             }
@@ -322,12 +324,40 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
             continue;  // Try next location
         }
         
-        // Step 5: Calculate τ (bit period) from preamble
-        // τ = (P₅ - P₁) / 4 (5 peaks = 4 bit periods)
-        uint32_t tau_samples = (peaks[4] - peaks[0]) / 4;
-        uint32_t tau_us = tau_samples * 8;
+        // Preamble quality check: Reject glitches with inconsistent peak heights
+        uint16_t min_height = 65535, max_height = 0;
+        for (int i = 0; i < 5; i++) {
+            if (peak_heights[i] < min_height) min_height = peak_heights[i];
+            if (peak_heights[i] > max_height) max_height = peak_heights[i];
+        }
         
-        NRF_LOG_INFO("Clock recovery: τ=%d samples (%dµs)", tau_samples, tau_us);
+        if (min_height < (max_height / 3)) {
+            NRF_LOG_WARNING("Preamble quality check failed: min=%d max=%d (glitch/noise burst)",
+                           min_height, max_height);
+            search_start = preamble_start + 500;
+            continue;  // Reject this candidate
+        }
+        
+        // Step 5: Calculate τ (bit period) from preamble with snap-to-grid
+        // τ = (P₅ - P₁) / 4 (5 peaks = 4 bit periods)
+        uint32_t raw_tau = (peaks[4] - peaks[0]) / 4;
+        uint32_t tau_samples;
+        
+        // Snap-to-grid clock recovery for carrier-synchronous tags
+        // Hitag2 is RF/32 (256µs) or RF/40 (320µs)
+        if (raw_tau >= 29 && raw_tau <= 35) {
+            tau_samples = 32;  // Lock to RF/32
+            NRF_LOG_INFO("Snap-to-grid: raw τ=%d → locked to 32 samples (256µs, RF/32)", raw_tau);
+        } else if (raw_tau >= 37 && raw_tau <= 43) {
+            tau_samples = 40;  // Lock to RF/40
+            NRF_LOG_INFO("Snap-to-grid: raw τ=%d → locked to 40 samples (320µs, RF/40)", raw_tau);
+        } else {
+            tau_samples = raw_tau;
+            NRF_LOG_INFO("Clock recovery: τ=%d samples (%dµs) - no snap (outside grid range)", 
+                        tau_samples, tau_samples * 8);
+        }
+        
+        uint32_t tau_us = tau_samples * 8;
         
         // STRICT VALIDATION: Minimum τ = 30 samples (240µs)
         // This rejects ghost noise (τ=25) and ensures we find real tag (τ=37)
