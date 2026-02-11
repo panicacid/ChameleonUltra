@@ -388,6 +388,7 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
         // Step 7: Phase-based sampling (32 bits)
         uint32_t uid = 0;
         bool decode_success = true;
+        uint32_t derivative_sum = 0;  // Track signal strength
         
         for (int bit = 0; bit < 32; bit++) {
             uint32_t t_start = data_start_sample + (bit * tau_samples);
@@ -401,6 +402,12 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
             
             uint16_t v_start = filtered[t_start];
             uint16_t v_mid = filtered[t_mid];
+            int16_t derivative = (int16_t)v_mid - (int16_t)v_start;
+            
+            // Track signal strength for first 8 bits
+            if (bit < 8) {
+                derivative_sum += (derivative < 0) ? -derivative : derivative;
+            }
             
             // Derivative-based edge detection: v_mid < v_start = falling = 1
             if (v_mid < v_start) {
@@ -409,7 +416,6 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
             
             // Debug logging for first few bits
             if (bit < 8) {
-                int16_t derivative = (int16_t)v_mid - (int16_t)v_start;
                 NRF_LOG_INFO("Bit %d: V_start=%d V_mid=%d derivative=%d → %d", 
                             bit, v_start, v_mid, derivative, (v_mid < v_start) ? 1 : 0);
             }
@@ -418,6 +424,15 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
         if (!decode_success) {
             search_start = preamble_start + 500;
             continue;  // Try next location
+        }
+        
+        // Step 8: Signal strength check - reject weak ghost noise
+        uint32_t avg_derivative = derivative_sum / 8;
+        if (avg_derivative < 100) {
+            NRF_LOG_WARNING("Signal too weak (Ghost): avg derivative=%d ADC", avg_derivative);
+            NRF_LOG_WARNING("Rejecting weak signal - continuing scan for real tag");
+            search_start = preamble_start + 500;
+            continue;  // Skip weak signal, keep scanning
         }
         
         // SUCCESS! Found valid tag and decoded UID
