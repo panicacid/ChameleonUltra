@@ -225,7 +225,7 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
         return false;
     }
     
-    NRF_LOG_INFO("Synchronous Phase-Sampling decoder with clock recovery");
+    NRF_LOG_INFO("Synchronous Phase-Sampling decoder with scanning loop");
     
     // Step 1: Apply 4-sample moving average to nullify 125kHz carrier
     // This averages 4 samples (32µs) to cancel out carrier oscillations
@@ -247,134 +247,165 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
     
     NRF_LOG_INFO("Applied 4-sample carrier-nulling filter");
     
-    // Step 2: Find quiet zone (low variance = stable carrier)
-    #define QUIET_WINDOW 100
-    #define QUIET_THRESHOLD 200
+    // SCANNING LOOP: Search entire buffer for valid tag signal
+    // Don't give up on first invalid candidate - could be ghost noise
+    int search_start = start_idx;
+    int attempt = 0;
     
-    int quiet_zone_end = start_idx;
-    for (int i = start_idx; i < sample_count - QUIET_WINDOW; i += 50) {
-        uint32_t variance = calculate_variance(filtered, i, QUIET_WINDOW);
-        if (variance < QUIET_THRESHOLD) {
-            quiet_zone_end = i + QUIET_WINDOW;
-            NRF_LOG_INFO("Quiet zone ending at sample %d (~%dms)", 
-                        quiet_zone_end, (quiet_zone_end * 8) / 1000);
-            break;
+    while (search_start < sample_count - 5000) {
+        attempt++;
+        NRF_LOG_INFO("=== Scan attempt %d starting at sample %d ===", attempt, search_start);
+        
+        // Step 2: Find quiet zone (low variance = stable carrier)
+        #define QUIET_WINDOW 100
+        #define QUIET_THRESHOLD 200
+        
+        int quiet_zone_end = search_start;
+        for (int i = search_start; i < sample_count - QUIET_WINDOW; i += 50) {
+            uint32_t variance = calculate_variance(filtered, i, QUIET_WINDOW);
+            if (variance < QUIET_THRESHOLD) {
+                quiet_zone_end = i + QUIET_WINDOW;
+                NRF_LOG_INFO("Quiet zone ending at sample %d (~%dms)", 
+                            quiet_zone_end, (quiet_zone_end * 8) / 1000);
+                break;
+            }
         }
-    }
-    
-    // Step 3: Find modulation start (high variance = tag responding)
-    int preamble_start = quiet_zone_end;
-    for (int i = quiet_zone_end; i < sample_count - QUIET_WINDOW; i += 10) {
-        uint32_t variance = calculate_variance(filtered, i, QUIET_WINDOW);
-        if (variance > QUIET_THRESHOLD * 3) {
-            preamble_start = i;
-            NRF_LOG_INFO("Modulation start at sample %d (~%dms)", 
-                        preamble_start, (preamble_start * 8) / 1000);
-            break;
+        
+        // Step 3: Find modulation start (high variance = tag responding)
+        int preamble_start = quiet_zone_end;
+        bool modulation_found = false;
+        for (int i = quiet_zone_end; i < sample_count - QUIET_WINDOW; i += 10) {
+            uint32_t variance = calculate_variance(filtered, i, QUIET_WINDOW);
+            if (variance > QUIET_THRESHOLD * 3) {
+                preamble_start = i;
+                NRF_LOG_INFO("Modulation start at sample %d (~%dms)", 
+                            preamble_start, (preamble_start * 8) / 1000);
+                modulation_found = true;
+                break;
+            }
         }
-    }
-    
-    // Step 4: Find 5 preamble peaks (11111 sync pattern)
-    uint16_t global_min = 4095, global_max = 0;
-    for (int i = preamble_start; i < sample_count && i < preamble_start + 2000; i++) {
-        if (filtered[i] < global_min) global_min = filtered[i];
-        if (filtered[i] > global_max) global_max = filtered[i];
-    }
-    uint16_t center = (global_min + global_max) / 2;
-    
-    uint32_t peaks[5];
-    int peak_count = 0;
-    
-    for (int i = preamble_start + 1; i < sample_count - 1 && peak_count < 5; i++) {
-        // Local maximum with 150 ADC hysteresis to filter noise
-        // Peak must be 150 ADC above baseline to prevent carrier ripple detection
-        if (filtered[i] > filtered[i-1] && 
-            filtered[i] > filtered[i+1] &&
-            filtered[i] > center + 150) {  // Hysteresis: 150 ADC above baseline
+        
+        if (!modulation_found) {
+            NRF_LOG_WARNING("No modulation found from sample %d, search exhausted", search_start);
+            break;  // End of buffer reached
+        }
+        
+        // Step 4: Find 5 preamble peaks (11111 sync pattern)
+        uint16_t global_min = 4095, global_max = 0;
+        for (int i = preamble_start; i < sample_count && i < preamble_start + 2000; i++) {
+            if (filtered[i] < global_min) global_min = filtered[i];
+            if (filtered[i] > global_max) global_max = filtered[i];
+        }
+        uint16_t center = (global_min + global_max) / 2;
+        
+        uint32_t peaks[5];
+        int peak_count = 0;
+        
+        for (int i = preamble_start + 1; i < sample_count - 1 && peak_count < 5; i++) {
+            // Local maximum with 150 ADC hysteresis to filter noise
+            // Peak must be 150 ADC above baseline to prevent carrier ripple detection
+            if (filtered[i] > filtered[i-1] && 
+                filtered[i] > filtered[i+1] &&
+                filtered[i] > center + 150) {  // Hysteresis: 150 ADC above baseline
+                
+                peaks[peak_count] = i;
+                NRF_LOG_INFO("Preamble peak %d at sample %d (height=%d above center)", 
+                            peak_count + 1, i, filtered[i] - center);
+                peak_count++;
+                i += 20;  // Skip to avoid double-counting
+            }
+        }
+        
+        if (peak_count < 5) {
+            NRF_LOG_WARNING("Only found %d peaks, need 5 - skipping to next candidate", peak_count);
+            search_start = preamble_start + 500;  // Skip past this noise event
+            continue;  // Try next location
+        }
+        
+        // Step 5: Calculate τ (bit period) from preamble
+        // τ = (P₅ - P₁) / 4 (5 peaks = 4 bit periods)
+        uint32_t tau_samples = (peaks[4] - peaks[0]) / 4;
+        uint32_t tau_us = tau_samples * 8;
+        
+        NRF_LOG_INFO("Clock recovery: τ=%d samples (%dµs)", tau_samples, tau_us);
+        
+        // STRICT VALIDATION: Minimum τ = 30 samples (240µs)
+        // This rejects ghost noise (τ=25) and ensures we find real tag (τ=37)
+        if (tau_samples < 30 || tau_samples > 56) {
+            NRF_LOG_WARNING("τ out of range: %d samples (%dµs) - expect 30-56 samples (240-448µs)", 
+                         tau_samples, tau_us);
+            NRF_LOG_WARNING("Likely ghost noise - continuing scan for real tag");
+            search_start = preamble_start + 500;  // Skip past this noise event
+            continue;  // Try next location
+        }
+        
+        NRF_LOG_INFO("Clock recovery validated: τ=%d samples (%dµs) ✓", tau_samples, tau_us);
+        
+        // Step 6: Calculate data start (5.0 bit periods after first peak)
+        // Center-to-center alignment: P1 is at phase 0.25 (HIGH center)
+        // 5 complete periods later = phase 0.25 of first data bit (HIGH center)
+        uint32_t data_start_sample = peaks[0] + (tau_samples * 5);  // 5.0 × τ
+        
+        NRF_LOG_INFO("Data start at sample %d (P1=%d + 5.0×τ)", 
+                    data_start_sample, peaks[0]);
+        
+        if (data_start_sample + (32 * tau_samples) >= sample_count) {
+            NRF_LOG_WARNING("Data extends beyond buffer - skipping to next candidate");
+            search_start = preamble_start + 500;
+            continue;  // Try next location
+        }
+        
+        // Step 7: Phase-based sampling (32 bits)
+        uint32_t uid = 0;
+        bool decode_success = true;
+        
+        for (int bit = 0; bit < 32; bit++) {
+            uint32_t t_start = data_start_sample + (bit * tau_samples);
+            uint32_t t_mid = t_start + (tau_samples / 2);
             
-            peaks[peak_count] = i;
-            NRF_LOG_INFO("Preamble peak %d at sample %d (height=%d above center)", 
-                        peak_count + 1, i, filtered[i] - center);
-            peak_count++;
-            i += 20;  // Skip to avoid double-counting
+            if (t_mid >= sample_count) {
+                NRF_LOG_WARNING("Bit %d sampling beyond buffer", bit);
+                decode_success = false;
+                break;
+            }
+            
+            uint16_t v_start = filtered[t_start];
+            uint16_t v_mid = filtered[t_mid];
+            
+            // Derivative-based edge detection: v_mid < v_start = falling = 1
+            if (v_mid < v_start) {
+                uid |= (1 << bit);
+            }
+            
+            // Debug logging for first few bits
+            if (bit < 8) {
+                int16_t derivative = (int16_t)v_mid - (int16_t)v_start;
+                NRF_LOG_INFO("Bit %d: V_start=%d V_mid=%d derivative=%d → %d", 
+                            bit, v_start, v_mid, derivative, (v_mid < v_start) ? 1 : 0);
+            }
         }
-    }
-    
-    if (peak_count < 5) {
-        NRF_LOG_ERROR("Only found %d peaks, need 5 for sync", peak_count);
+        
+        if (!decode_success) {
+            search_start = preamble_start + 500;
+            continue;  // Try next location
+        }
+        
+        // SUCCESS! Found valid tag and decoded UID
+        NRF_LOG_INFO("✓ VALID TAG FOUND after %d scan attempts", attempt);
+        NRF_LOG_INFO("Decoded 32-bit UID: 0x%08X", uid);
+        
+        // Copy UID to output
+        memcpy(data, &uid, 4);
+        
         free(filtered);
-        return false;
-    }
-    
-    // Step 5: Calculate τ (bit period) from preamble
-    // τ = (P₅ - P₁) / 4 (5 peaks = 4 bit periods)
-    uint32_t tau_samples = (peaks[4] - peaks[0]) / 4;
-    uint32_t tau_us = tau_samples * 8;
-    
-    NRF_LOG_INFO("Clock recovery: τ=%d samples (%dµs)", tau_samples, tau_us);
-    
-    // Validation: Accept fast Paxton tags (24 samples = 192µs minimum)
-    // Some tags operate slightly faster than standard
-    if (tau_samples < 24 || tau_samples > 56) {
-        NRF_LOG_ERROR("τ out of range: %d samples (%dµs) - expect 24-56 samples (192-448µs)", 
-                     tau_samples, tau_us);
-        NRF_LOG_ERROR("This is likely carrier ripple, not tag modulation");
-        free(filtered);
-        return false;
-    }
-    
-    NRF_LOG_INFO("Clock recovery validated: τ=%d samples (%dµs) ✓", tau_samples, tau_us);
-    
-    // Step 6: Calculate data start (5.0 bit periods after first peak)
-    // Center-to-center alignment: P1 is at phase 0.25 (HIGH center)
-    // 5 complete periods later = phase 0.25 of first data bit (HIGH center)
-    uint32_t data_start_sample = peaks[0] + (tau_samples * 5);  // 5.0 × τ
-    
-    NRF_LOG_INFO("Data start at sample %d (P1=%d + 5.0×τ)", 
-                data_start_sample, peaks[0]);
-    
-    if (data_start_sample + (32 * tau_samples) >= sample_count) {
-        NRF_LOG_ERROR("Data extends beyond buffer");
-        free(filtered);
-        return false;
-    }
-    
-    // Step 7: Phase-based sampling (32 bits)
-    uint32_t uid = 0;
-    
-    for (int bit = 0; bit < 32; bit++) {
-        uint32_t t_start = data_start_sample + (bit * tau_samples);
-        uint32_t t_mid = t_start + (tau_samples / 2);
+        return true;
         
-        if (t_mid >= sample_count) {
-            NRF_LOG_ERROR("Bit %d sampling beyond buffer", bit);
-            free(filtered);
-            return false;
-        }
-        
-        uint16_t v_start = filtered[t_start];
-        uint16_t v_mid = filtered[t_mid];
-        
-        // Derivative-based edge detection: v_mid < v_start = falling = 1
-        if (v_mid < v_start) {
-            uid |= (1 << bit);
-        }
-        
-        // Debug logging for first few bits
-        if (bit < 8) {
-            int16_t derivative = (int16_t)v_mid - (int16_t)v_start;
-            NRF_LOG_INFO("Bit %d: V_start=%d V_mid=%d derivative=%d → %d", 
-                        bit, v_start, v_mid, derivative, (v_mid < v_start) ? 1 : 0);
-        }
-    }
+    }  // End of scanning loop
     
-    NRF_LOG_INFO("Decoded 32-bit UID: 0x%08X", uid);
-    
-    // Copy UID to output
-    memcpy(data, &uid, 4);
-    
+    // Exhausted buffer without finding valid tag
+    NRF_LOG_ERROR("Scanned entire buffer (%d attempts) - no valid tag found", attempt);
     free(filtered);
-    return true;
+    return false;
 }
 
 /**
