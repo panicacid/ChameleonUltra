@@ -34,15 +34,7 @@ extern nrf_pwm_values_individual_t m_lf_125khz_pwm_seq_val[];
 // PWM at 125kHz = 125,000 samples/second
 // 100ms collection = 12,500 samples needed
 // Use 16384 (power of 2) for full UID capture with margin
-// CRITICAL: 8192 was too small - only captured ~30 edges (need ~70+)
-#define HITAG2_BUFFER_SIZE        16384  // Doubled for full 32-bit UID capture
-
-// Calibrated threshold based on scope measurements
-// Scope data: Floor=0V, Weak data peaks=2.25V, Strong peaks=3.28V
-// Option 1: Midpoint between floor and weak peaks = (0V + 2.25V) / 2 = 1.125V
-// ADC value (12-bit, 3.3V ref): (1.125 / 3.3) × 4095 = 1395 ADC
-// Margin above threshold: 2793 - 1395 = 1398 ADC (1.125V) - Much safer!
-#define HITAG2_ADC_THRESHOLD_CALIBRATED 1395  // 1.125V for reliable 2.25V weak peak detection
+#define HITAG2_BUFFER_SIZE        16384  // Power of 2 for full 32-bit UID capture
 
 static circular_buffer cb;
 
@@ -364,6 +356,7 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
     free(intervals);
     free(filtered);
     return true;
+}
 
 /**
  * Attempt to read Hitag2 tag UID using RTF protocol
@@ -373,15 +366,16 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
  * 2. Request timeslot for time-critical BPLM transmission
  * 3. Send START_AUTH with correct OFF-then-ON BPLM pattern
  * 4. Receive Manchester response via SAADC sampling
- * 5. Detect edges from samples and feed intervals to decoder
+ * 5. RFIDler-style pulse width decoder (digital logic approach)
  * 
  * Based on:
  * - Proxmark3 hitag2.c for BPLM encoding and timing
+ * - RFIDler hitag.c for pulse width decoding algorithm
  * - ChameleonUltra T55xx for timeslot usage
  * - ChameleonUltra HID for SAADC sampling
  */
 bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
-    NRF_LOG_INFO("Hitag2 START_AUTH with Synchronous Phase-Sampling decoder");
+    NRF_LOG_INFO("Hitag2 START_AUTH with RFIDler-style pulse width decoder");
     
     // Initialize circular buffer for SAADC samples
     cb_init(&cb, HITAG2_BUFFER_SIZE, sizeof(uint16_t));
@@ -422,7 +416,7 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         return false;
     }
     
-    // Call synchronous phase-sampling decoder
+    // Call RFIDler-style pulse width decoder
     bool success = hitag2_sync_decode(samples, sample_count, data);
     
     // Cleanup
@@ -434,7 +428,7 @@ bool hitag2_read(uint8_t *data, uint32_t timeout_ms) {
         NRF_LOG_INFO("SUCCESS! Hitag2 UID: %02X%02X%02X%02X", 
                     data[0], data[1], data[2], data[3]);
     } else {
-        NRF_LOG_ERROR("Synchronous decoding failed");
+        NRF_LOG_ERROR("Pulse width decoding failed");
     }
     
     return success;
