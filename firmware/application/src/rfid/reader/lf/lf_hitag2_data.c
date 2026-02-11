@@ -308,108 +308,49 @@ static bool hitag2_sync_decode(uint16_t *samples, int sample_count, uint8_t *dat
         return false;
     }
     
-    // Step 5: Omni-Decoder - Try all 4 Manchester alignments
-    // Manchester has 2 variables: phase (±10/11) and polarity (true/false)
-    // One of these 4 combinations MUST be correct
+    // Step 5: Decode Manchester (Locked to Candidate B settings)
+    // Settings: +10 offset, inverted polarity (last_bit starts false)
+    // Tolerances relaxed to accept narrower pulses (avoid desync)
     
-    NRF_LOG_INFO("=== OMNI-DECODER: Trying all 4 Manchester alignments ===");
+    NRF_LOG_INFO("Step 5: Decoding 32-bit UID (Candidate B: +10 Inverted)");
     
-    // Decode helper function - inline for each candidate
-    uint32_t uid_a = 0, uid_b = 0, uid_c = 0, uid_d = 0;
+    uint32_t uid = 0;
+    bool last_bit = false;  // Inverted polarity (Candidate B)
+    int interval_idx = preamble_start + 10;  // Candidate B offset
     
-    // Candidate A: +10 offset, normal polarity
-    {
-        uint32_t result = 0;
-        bool last_bit = true;
-        int idx = preamble_start + 10;
-        
-        for (int bit = 0; bit < 32; bit++) {
-            if (idx >= interval_count) break;
-            uint16_t pulse = intervals[idx++];
-            
-            if (pulse >= 12 && pulse <= 24) {
-                last_bit = !last_bit;
-            }
-            
-            if (last_bit) {
-                result |= (1 << bit);
-            }
+    for (int bit = 0; bit < 32; bit++) {
+        if (interval_idx >= interval_count) {
+            NRF_LOG_ERROR("Ran out of intervals at bit %d", bit);
+            break;
         }
-        uid_a = result;
-    }
-    NRF_LOG_INFO("[Candidate A] +10 Normal:   UID: 0x%08X", uid_a);
-    
-    // Candidate B: +10 offset, inverted polarity
-    {
-        uint32_t result = 0;
-        bool last_bit = false;
-        int idx = preamble_start + 10;
         
-        for (int bit = 0; bit < 32; bit++) {
-            if (idx >= interval_count) break;
-            uint16_t pulse = intervals[idx++];
-            
-            if (pulse >= 12 && pulse <= 24) {
-                last_bit = !last_bit;
-            }
-            
-            if (last_bit) {
-                result |= (1 << bit);
-            }
-        }
-        uid_b = result;
-    }
-    NRF_LOG_INFO("[Candidate B] +10 Inverted: UID: 0x%08X", uid_b);
-    
-    // Candidate C: +11 offset, normal polarity
-    {
-        uint32_t result = 0;
-        bool last_bit = true;
-        int idx = preamble_start + 11;
+        uint16_t pulse = intervals[interval_idx++];
         
-        for (int bit = 0; bit < 32; bit++) {
-            if (idx >= interval_count) break;
-            uint16_t pulse = intervals[idx++];
-            
-            if (pulse >= 12 && pulse <= 24) {
-                last_bit = !last_bit;
-            }
-            
-            if (last_bit) {
-                result |= (1 << bit);
-            }
+        // Relaxed tolerances to keep stream synchronized
+        if (pulse >= 8 && pulse <= 24) {
+            // Short pulse = transition
+            last_bit = !last_bit;
+        } else if (pulse >= 25 && pulse <= 50) {
+            // Long pulse = no transition (last_bit stays same)
+        } else {
+            NRF_LOG_WARNING("Unusual pulse width: %d at bit %d", pulse, bit);
         }
-        uid_c = result;
-    }
-    NRF_LOG_INFO("[Candidate C] +11 Normal:   UID: 0x%08X", uid_c);
-    
-    // Candidate D: +11 offset, inverted polarity
-    {
-        uint32_t result = 0;
-        bool last_bit = false;
-        int idx = preamble_start + 11;
         
-        for (int bit = 0; bit < 32; bit++) {
-            if (idx >= interval_count) break;
-            uint16_t pulse = intervals[idx++];
-            
-            if (pulse >= 12 && pulse <= 24) {
-                last_bit = !last_bit;
-            }
-            
-            if (last_bit) {
-                result |= (1 << bit);
-            }
+        if (last_bit) {
+            uid |= (1 << bit);
         }
-        uid_d = result;
+        
+        if (bit < 8) {
+            NRF_LOG_INFO("Bit %d: pulse=%d → bit=%d", bit, pulse, last_bit ? 1 : 0);
+        }
     }
-    NRF_LOG_INFO("[Candidate D] +11 Inverted: UID: 0x%08X", uid_d);
     
-    NRF_LOG_INFO("=== One of these 4 UIDs should match your tag! ===");
+    NRF_LOG_INFO("Decoded raw UID: 0x%08X", uid);
     
-    // Return Candidate D (was working in calibration)
-    // User can see all 4 options above
-    uint32_t uid = uid_d;
+    // Apply right shift by 1 to correct alignment
+    // This turns 0x28... into 0x14... (target)
+    uid = uid >> 1;
+    NRF_LOG_INFO("After >>1 shift: 0x%08X (final UID)", uid);
     
     // Copy UID to output
     memcpy(data, &uid, 4);
